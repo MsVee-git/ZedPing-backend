@@ -2,20 +2,22 @@ const express = require('express')
 const router = express.Router()
 const supabase = require('../lib/supabase')
 
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'zedping123'
-
 router.get('/', (req, res) => {
   const mode = req.query['hub.mode']
   const token = req.query['hub.verify_token']
   const challenge = req.query['hub.challenge']
 
-  console.log('Webhook hit - mode:', mode, 'token:', token, 'expected:', VERIFY_TOKEN)
+  const expected = (process.env.VERIFY_TOKEN || 'zedping123').trim()
+  const received = (token || '').trim()
 
-  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    console.log('Webhook verified successfully')
+  console.log('mode:', mode)
+  console.log('received:', JSON.stringify(received))
+  console.log('expected:', JSON.stringify(expected))
+  console.log('match:', received === expected)
+
+  if (mode === 'subscribe' && received === expected) {
     res.status(200).send(challenge)
   } else {
-    console.log('Webhook verification failed')
     res.sendStatus(403)
   }
 })
