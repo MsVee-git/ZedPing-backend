@@ -31,7 +31,6 @@ router.post('/', async (req, res) => {
             const messageBody = message.text?.body || ''
             const toNumber = value.metadata.display_phone_number
             const phoneNumberId = value.metadata.phone_number_id
-
             await supabase.from('messages').insert({
               direction: 'inbound',
               from_number: fromNumber,
@@ -39,15 +38,11 @@ router.post('/', async (req, res) => {
               message_body: messageBody,
               status: 'received'
             })
-
             console.log('Message received from:', fromNumber, ':', messageBody)
-
             const handled = await checkAISession(fromNumber, messageBody, phoneNumberId)
             if (handled) continue
-
             const flowHandled = await checkFlowSession(fromNumber, messageBody, phoneNumberId)
             if (flowHandled) continue
-
             await checkAutomations(fromNumber, messageBody, phoneNumberId)
           }
         }
@@ -65,19 +60,32 @@ async function checkAutomations(fromNumber, messageBody, phoneNumberId) {
       .select('*')
       .eq('trigger_type', 'keyword')
       .eq('is_active', true)
-
     if (error || !automations || automations.length === 0) return
-
+    let matched = false
     for (const automation of automations) {
       const triggerValue = (automation.trigger_value || '').toUpperCase()
-      if (keyword === triggerValue) {
+      if (keyword === triggerValue && triggerValue !== 'DEFAULT') {
         console.log('Automation matched:', automation.trigger_value)
-
+        if (triggerValue === 'CHAT') {
+          const { data: agents } = await supabase
+            .from('ai_agents')
+            .select('*')
+            .eq('is_active', true)
+            .limit(1)
+          if (agents && agents.length > 0) {
+            await supabase.from('ai_agent_sessions').upsert({
+              agent_id: agents[0].id,
+              contact_phone: fromNumber,
+              messages: [],
+              status: 'active',
+              updated_at: new Date().toISOString()
+            }, { onConflict: 'contact_phone' })
+          }
+        }
         if (automation.chatbot_flow_id) {
           await startChatbotFlow(fromNumber, phoneNumberId, automation.chatbot_flow_id)
           return
         }
-
         await sendTextMessage(phoneNumberId, fromNumber, automation.message_template)
         await supabase.from('messages').insert({
           direction: 'outbound',
@@ -86,7 +94,21 @@ async function checkAutomations(fromNumber, messageBody, phoneNumberId) {
           status: 'sent'
         })
         console.log('Auto-reply sent to:', fromNumber)
+        matched = true
         break
+      }
+    }
+    if (!matched) {
+      const defaultAuto = automations.find(a => a.trigger_value.toUpperCase() === 'DEFAULT')
+      if (defaultAuto) {
+        await sendTextMessage(phoneNumberId, fromNumber, defaultAuto.message_template)
+        await supabase.from('messages').insert({
+          direction: 'outbound',
+          to_number: fromNumber,
+          message_body: defaultAuto.message_template,
+          status: 'sent'
+        })
+        console.log('Default fallback sent to:', fromNumber)
       }
     }
   } catch (err) {
@@ -102,11 +124,8 @@ async function startChatbotFlow(fromNumber, phoneNumberId, flowId) {
       .eq('flow_id', flowId)
       .order('step_order', { ascending: true })
       .limit(1)
-
     if (!steps || steps.length === 0) return
-
     const firstStep = steps[0]
-
     await supabase.from('chatbot_sessions').upsert({
       contact_phone: fromNumber,
       flow_id: flowId,
@@ -114,7 +133,6 @@ async function startChatbotFlow(fromNumber, phoneNumberId, flowId) {
       status: 'active',
       updated_at: new Date().toISOString()
     }, { onConflict: 'contact_phone' })
-
     await sendTextMessage(phoneNumberId, fromNumber, firstStep.message_body)
     await supabase.from('messages').insert({
       direction: 'outbound',
@@ -122,7 +140,6 @@ async function startChatbotFlow(fromNumber, phoneNumberId, flowId) {
       message_body: firstStep.message_body,
       status: 'sent'
     })
-
     console.log('Chatbot flow started for:', fromNumber)
   } catch (err) {
     console.error('Chatbot flow error:', err)
@@ -137,19 +154,14 @@ async function checkFlowSession(fromNumber, messageBody, phoneNumberId) {
       .eq('contact_phone', fromNumber)
       .eq('status', 'active')
       .single()
-
     if (!session) return false
-
     const reply = messageBody.trim().toUpperCase()
-
     const { data: routes } = await supabase
       .from('chatbot_step_routes')
       .select('*')
       .eq('step_id', session.current_step_id)
       .eq('match_value', reply)
-
     let nextStepId = null
-
     if (routes && routes.length > 0) {
       nextStepId = routes[0].next_step_id
     } else {
@@ -158,12 +170,10 @@ async function checkFlowSession(fromNumber, messageBody, phoneNumberId) {
         .select('*')
         .eq('id', session.current_step_id)
         .single()
-
       if (currentStep && currentStep.next_step_id) {
         nextStepId = currentStep.next_step_id
       }
     }
-
     if (!nextStepId) {
       await supabase.from('chatbot_sessions')
         .update({ status: 'ended', updated_at: new Date().toISOString() })
@@ -171,19 +181,15 @@ async function checkFlowSession(fromNumber, messageBody, phoneNumberId) {
       console.log('Chatbot flow ended for:', fromNumber)
       return true
     }
-
     const { data: nextStep } = await supabase
       .from('chatbot_steps')
       .select('*')
       .eq('id', nextStepId)
       .single()
-
     if (!nextStep) return false
-
     await supabase.from('chatbot_sessions')
       .update({ current_step_id: nextStepId, updated_at: new Date().toISOString() })
       .eq('contact_phone', fromNumber)
-
     await sendTextMessage(phoneNumberId, fromNumber, nextStep.message_body)
     await supabase.from('messages').insert({
       direction: 'outbound',
@@ -191,7 +197,6 @@ async function checkFlowSession(fromNumber, messageBody, phoneNumberId) {
       message_body: nextStep.message_body,
       status: 'sent'
     })
-
     console.log('Chatbot advanced to step:', nextStepId)
     return true
   } catch (err) {
@@ -208,32 +213,24 @@ async function checkAISession(fromNumber, messageBody, phoneNumberId) {
       .eq('contact_phone', fromNumber)
       .eq('status', 'active')
       .single()
-
     if (!session) return false
-
     const agent = session.ai_agents
-
     if (agent.handoff_keyword && messageBody.trim().toUpperCase() === agent.handoff_keyword.toUpperCase()) {
       await supabase.from('ai_agent_sessions')
         .update({ status: 'handed_off', updated_at: new Date().toISOString() })
         .eq('id', session.id)
-
-      const handoffMsg = 'You have been connected to a human agent. Someone will be with you shortly.'
+      const handoffMsg = 'You have been connected to a human agent. Someone will be with you shortly. You can also call us on +260 771 442 247.'
       await sendTextMessage(phoneNumberId, fromNumber, handoffMsg)
       console.log('AI session handed off for:', fromNumber)
       return true
     }
-
     const messages = session.messages || []
     messages.push({ role: 'user', content: messageBody })
-
     const aiReply = await getAIResponse(agent.system_prompt, messages)
     messages.push({ role: 'assistant', content: aiReply })
-
     await supabase.from('ai_agent_sessions')
       .update({ messages, updated_at: new Date().toISOString() })
       .eq('id', session.id)
-
     await sendTextMessage(phoneNumberId, fromNumber, aiReply)
     await supabase.from('messages').insert({
       direction: 'outbound',
@@ -241,7 +238,6 @@ async function checkAISession(fromNumber, messageBody, phoneNumberId) {
       message_body: aiReply,
       status: 'sent'
     })
-
     console.log('AI reply sent to:', fromNumber)
     return true
   } catch (err) {
