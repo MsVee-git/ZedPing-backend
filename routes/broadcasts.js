@@ -36,4 +36,60 @@ router.post('/send', async (req, res) => {
   if (!contacts || !message) return res.status(400).json({ error: 'contacts and message required' })
   const pid = phoneNumberId || process.env.META_PHONE_NUMBER_ID
   const results = await sendBroadcast(contacts, message, pid)
-  const sent = results.filter(r => r.status === 'sent').
+  const sent = results.filter(r => r.status === 'sent').length
+  const failed = results.filter(r => r.status === 'failed').length
+  res.json({ success: true, sent, failed, results })
+})
+
+router.post('/schedule', async (req, res) => {
+  const { contacts, message, phoneNumberId, scheduled_at, broadcast_name } = req.body
+  if (!contacts || !message || !scheduled_at) {
+    return res.status(400).json({ error: 'contacts, message and scheduled_at required' })
+  }
+  const { data, error } = await supabase
+    .from('scheduled_broadcasts')
+    .insert({
+      broadcast_name: broadcast_name || 'Untitled Broadcast',
+      contacts,
+      message,
+      phone_number_id: phoneNumberId || process.env.META_PHONE_NUMBER_ID,
+      scheduled_at,
+      status: 'pending'
+    })
+    .select()
+  if (error) return res.status(500).json({ error: error.message })
+  res.json({ success: true, broadcast: data[0] })
+})
+
+router.get('/scheduled', async (req, res) => {
+  const { data, error } = await supabase
+    .from('scheduled_broadcasts')
+    .select('*')
+    .order('scheduled_at', { ascending: true })
+  if (error) return res.status(500).json({ error: error.message })
+  res.json(data)
+})
+
+router.post('/process', async (req, res) => {
+  const now = new Date().toISOString()
+  const { data: due, error } = await supabase
+    .from('scheduled_broadcasts')
+    .select('*')
+    .eq('status', 'pending')
+    .lte('scheduled_at', now)
+  if (error) return res.status(500).json({ error: error.message })
+  if (!due || due.length === 0) return res.json({ processed: 0 })
+  for (const broadcast of due) {
+    await supabase.from('scheduled_broadcasts').update({ status: 'sending' }).eq('id', broadcast.id)
+    const results = await sendBroadcast(broadcast.contacts, broadcast.message, broadcast.phone_number_id)
+    const sent = results.filter(r => r.status === 'sent').length
+    const failed = results.filter(r => r.status === 'failed').length
+    await supabase.from('scheduled_broadcasts').update({
+      status: 'completed', sent_count: sent, failed_count: failed,
+      completed_at: new Date().toISOString()
+    }).eq('id', broadcast.id)
+  }
+  res.json({ success: true, processed: due.length })
+})
+
+module.exports = router
