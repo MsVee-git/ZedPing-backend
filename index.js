@@ -10,12 +10,16 @@ const messageRoutes = require('./routes/messages')
 const contactRoutes = require('./routes/contacts')
 const broadcastRoutes = require('./routes/broadcasts')
 const automationRoutes = require('./routes/automations')
+const catalogRoutes = require('./routes/catalog')
+const orderRoutes = require('./routes/orders')
 
 app.use('/webhook', webhookRoutes)
 app.use('/messages', messageRoutes)
 app.use('/contacts', contactRoutes)
 app.use('/broadcasts', broadcastRoutes)
 app.use('/automations', automationRoutes)
+app.use('/catalog', catalogRoutes)
+app.use('/orders', orderRoutes)
 
 app.get('/', (req, res) => {
   res.json({ status: 'ZedPing backend is running' })
