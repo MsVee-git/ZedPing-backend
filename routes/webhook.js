@@ -226,7 +226,7 @@ async function checkAISession(fromNumber, messageBody, phoneNumberId) {
     }
     const messages = session.messages || []
     messages.push({ role: 'user', content: messageBody })
-    const aiReply = await getAIResponse(agent.system_prompt, messages)
+    const aiReply = await getAIResponse(agent.system_prompt, messages, agent)
     messages.push({ role: 'assistant', content: aiReply })
     await supabase.from('ai_agent_sessions')
       .update({ messages, updated_at: new Date().toISOString() })
