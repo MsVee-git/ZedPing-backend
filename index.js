@@ -28,5 +28,4 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => {
   console.log(`ZedPing backend running on port ${PORT}`)
-  console.log('VERIFY_TOKEN:', process.env.VERIFY_TOKEN)
 })
