@@ -5,7 +5,7 @@ const supabase=require('../lib/supabase')
 const {sendTextMessage}=require('../lib/whatsapp')
 const {getAIResponse}=require('../lib/openai')
 
-router.get('/',(req,res)=>{const ok=req.query['hub.mode']==='subscribe'&&crypto.timingSafeEqual(Buffer.from(String(req.query['hub.verify_token']||'')),Buffer.from(String(process.env.VERIFY_TOKEN||'')));return ok?res.status(200).send(req.query['hub.challenge']):res.sendStatus(403)})
+router.get('/',(req,res)=>{const received=Buffer.from(String(req.query['hub.verify_token']||''));const expected=Buffer.from(String(process.env.VERIFY_TOKEN||''));const ok=req.query['hub.mode']==='subscribe'&&received.length===expected.length&&crypto.timingSafeEqual(received,expected);return ok?res.status(200).send(req.query['hub.challenge']):res.sendStatus(403)})
 
 function validSignature(req){const secret=process.env.META_APP_SECRET;const signature=req.get('x-hub-signature-256')||'';if(!secret||!signature.startsWith('sha256='))return false;const expected='sha256='+crypto.createHmac('sha256',secret).update(req.rawBody||'').digest('hex');return signature.length===expected.length&&crypto.timingSafeEqual(Buffer.from(signature),Buffer.from(expected))}
 
