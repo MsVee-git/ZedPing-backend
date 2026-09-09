@@ -1,95 +1,11 @@
-const express = require('express')
-const router = express.Router()
-const supabase = require('../lib/supabase')
-const { sendTextMessage } = require('../lib/whatsapp')
-
-async function sendBroadcast(contacts, message, phoneNumberId) {
-  const results = []
-  for (const contact of contacts) {
-    try {
-      let msg = message
-      msg = msg.replace(/{{name}}/gi, contact.name || '')
-      msg = msg.replace(/{{phone}}/gi, contact.phone_number || '')
-      if (contact.custom_fields) {
-        Object.entries(contact.custom_fields).forEach(([k, v]) => {
-          msg = msg.replace(new RegExp(`{{${k}}}`, 'gi'), v || '')
-        })
-      }
-      await sendTextMessage(phoneNumberId, contact.phone_number, msg)
-      await supabase.from('messages').insert({
-        direction: 'outbound',
-        to_number: contact.phone_number,
-        message_body: msg,
-        status: 'sent'
-      })
-      results.push({ phone: contact.phone_number, status: 'sent' })
-      await new Promise(r => setTimeout(r, 50))
-    } catch (err) {
-      results.push({ phone: contact.phone_number, status: 'failed', error: err.message })
-    }
-  }
-  return results
-}
-
-router.post('/send', async (req, res) => {
-  const { contacts, message, phoneNumberId } = req.body
-  if (!contacts || !message) return res.status(400).json({ error: 'contacts and message required' })
-  const pid = phoneNumberId || process.env.META_PHONE_NUMBER_ID
-  const results = await sendBroadcast(contacts, message, pid)
-  const sent = results.filter(r => r.status === 'sent').length
-  const failed = results.filter(r => r.status === 'failed').length
-  res.json({ success: true, sent, failed, results })
-})
-
-router.post('/schedule', async (req, res) => {
-  const { contacts, message, phoneNumberId, scheduled_at, broadcast_name } = req.body
-  if (!contacts || !message || !scheduled_at) {
-    return res.status(400).json({ error: 'contacts, message and scheduled_at required' })
-  }
-  const { data, error } = await supabase
-    .from('scheduled_broadcasts')
-    .insert({
-      broadcast_name: broadcast_name || 'Untitled Broadcast',
-      contacts,
-      message,
-      phone_number_id: phoneNumberId || process.env.META_PHONE_NUMBER_ID,
-      scheduled_at,
-      status: 'pending'
-    })
-    .select()
-  if (error) return res.status(500).json({ error: error.message })
-  res.json({ success: true, broadcast: data[0] })
-})
-
-router.get('/scheduled', async (req, res) => {
-  const { data, error } = await supabase
-    .from('scheduled_broadcasts')
-    .select('*')
-    .order('scheduled_at', { ascending: true })
-  if (error) return res.status(500).json({ error: error.message })
-  res.json(data)
-})
-
-router.post('/process', async (req, res) => {
-  const now = new Date().toISOString()
-  const { data: due, error } = await supabase
-    .from('scheduled_broadcasts')
-    .select('*')
-    .eq('status', 'pending')
-    .lte('scheduled_at', now)
-  if (error) return res.status(500).json({ error: error.message })
-  if (!due || due.length === 0) return res.json({ processed: 0 })
-  for (const broadcast of due) {
-    await supabase.from('scheduled_broadcasts').update({ status: 'sending' }).eq('id', broadcast.id)
-    const results = await sendBroadcast(broadcast.contacts, broadcast.message, broadcast.phone_number_id)
-    const sent = results.filter(r => r.status === 'sent').length
-    const failed = results.filter(r => r.status === 'failed').length
-    await supabase.from('scheduled_broadcasts').update({
-      status: 'completed', sent_count: sent, failed_count: failed,
-      completed_at: new Date().toISOString()
-    }).eq('id', broadcast.id)
-  }
-  res.json({ success: true, processed: due.length })
-})
-
-module.exports = router
+const express=require('express')
+const router=express.Router()
+const supabase=require('../lib/supabase')
+const {sendTextMessage}=require('../lib/whatsapp')
+async function numberFor(workspace,id){return (await supabase.from('whatsapp_numbers').select('*').eq('id',id).eq('customer_id',workspace).eq('status','connected').maybeSingle()).data}
+async function sendBroadcast(workspace,number,contacts,message){const results=[];for(const c of contacts){try{let body=message.replace(/{{name}}/gi,c.name||'').replace(/{{phone}}/gi,c.phone_number||'');await sendTextMessage(number.phone_number_id,c.phone_number,body,number.access_token);await supabase.from('messages').insert({customer_id:workspace,whatsapp_number_id:number.id,direction:'outbound',to_number:c.phone_number,message_body:body,status:'sent'});results.push({phone:c.phone_number,status:'sent'})}catch(error){results.push({phone:c.phone_number,status:'failed',error:error.message})}}return results}
+router.post('/send',async(req,res)=>{const {contacts,message,phoneNumberId}=req.body;if(!Array.isArray(contacts)||!message||!phoneNumberId)return res.status(400).json({error:'contacts, message and phoneNumberId required'});const number=await numberFor(req.workspace.customerId,phoneNumberId);if(!number)return res.status(404).json({error:'Connected WhatsApp number not found'});const allowed=(await supabase.from('contacts').select('id,name,phone_number,custom_fields').eq('customer_id',req.workspace.customerId).in('id',contacts.map(c=>c.id).filter(Boolean))).data||[];if(allowed.length!==contacts.length)return res.status(403).json({error:'One or more contacts do not belong to this workspace'});const results=await sendBroadcast(req.workspace.customerId,number,allowed,message);res.json({success:true,sent:results.filter(x=>x.status==='sent').length,failed:results.filter(x=>x.status==='failed').length,results})})
+router.post('/schedule',async(req,res)=>{const {contacts,message,phoneNumberId,scheduled_at,broadcast_name}=req.body;if(!Array.isArray(contacts)||!message||!phoneNumberId||!scheduled_at)return res.status(400).json({error:'contacts, message, phoneNumberId and scheduled_at required'});const number=await numberFor(req.workspace.customerId,phoneNumberId);if(!number)return res.status(404).json({error:'Connected WhatsApp number not found'});const {data,error}=await supabase.from('scheduled_broadcasts').insert({customer_id:req.workspace.customerId,broadcast_name:broadcast_name||'Untitled Broadcast',contacts,message,phone_number_id:number.phone_number_id,scheduled_at,status:'pending'}).select();if(error)return res.status(500).json({error:error.message});res.json({success:true,broadcast:data[0]})})
+router.get('/scheduled',async(req,res)=>{const {data,error}=await supabase.from('scheduled_broadcasts').select('*').eq('customer_id',req.workspace.customerId).order('scheduled_at');if(error)return res.status(500).json({error:error.message});res.json(data)})
+router.post('/process',async(req,res)=>{const {data:due,error}=await supabase.from('scheduled_broadcasts').select('*').eq('customer_id',req.workspace.customerId).eq('status','pending').lte('scheduled_at',new Date().toISOString());if(error)return res.status(500).json({error:error.message});for(const b of due||[]){const {data:number}=await supabase.from('whatsapp_numbers').select('*').eq('customer_id',req.workspace.customerId).eq('phone_number_id',b.phone_number_id).eq('status','connected').maybeSingle();if(!number)continue;const results=await sendBroadcast(req.workspace.customerId,number,b.contacts,b.message);await supabase.from('scheduled_broadcasts').update({status:'completed',sent_count:results.filter(x=>x.status==='sent').length,failed_count:results.filter(x=>x.status==='failed').length,completed_at:new Date().toISOString()}).eq('id',b.id).eq('customer_id',req.workspace.customerId)}res.json({success:true,processed:(due||[]).length})})
+module.exports=router
