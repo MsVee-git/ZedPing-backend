@@ -3,8 +3,13 @@ const cors = require('cors')
 
 const app = express()
 app.use(cors())
-app.use(express.json())
+app.use(express.json({
+  verify: (req, res, buffer) => {
+    req.rawBody = buffer
+  }
+}))
 
+const { requireWorkspace } = require('./middleware/auth')
 const webhookRoutes = require('./routes/webhook')
 const messageRoutes = require('./routes/messages')
 const contactRoutes = require('./routes/contacts')
@@ -14,12 +19,12 @@ const catalogRoutes = require('./routes/catalog')
 const orderRoutes = require('./routes/orders')
 
 app.use('/webhook', webhookRoutes)
-app.use('/messages', messageRoutes)
-app.use('/contacts', contactRoutes)
-app.use('/broadcasts', broadcastRoutes)
-app.use('/automations', automationRoutes)
-app.use('/catalog', catalogRoutes)
-app.use('/orders', orderRoutes)
+app.use('/messages', requireWorkspace, messageRoutes)
+app.use('/contacts', requireWorkspace, contactRoutes)
+app.use('/broadcasts', requireWorkspace, broadcastRoutes)
+app.use('/automations', requireWorkspace, automationRoutes)
+app.use('/catalog', requireWorkspace, catalogRoutes)
+app.use('/orders', requireWorkspace, orderRoutes)
 
 app.get('/', (req, res) => {
   res.json({ status: 'ZedPing backend is running' })
