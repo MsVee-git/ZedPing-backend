@@ -1,4 +1,5 @@
 const supabase = require('../lib/supabase')
+const { resolveWorkspaceSelection } = require('./workspaceSelection')
 
 async function requireWorkspace(req, res, next) {
   const header = req.get('authorization') || ''
@@ -14,15 +15,26 @@ async function requireWorkspace(req, res, next) {
   ])
   const workspaces = new Map()
   for (const workspace of owned || []) workspaces.set(workspace.id, 'owner')
-  for (const membership of memberships || []) workspaces.set(membership.customer_id, membership.role)
+  for (const membership of memberships || []) {
+    if (!workspaces.has(membership.customer_id) || membership.role === 'owner') {
+      workspaces.set(membership.customer_id, membership.role)
+    }
+  }
 
-  const requestedWorkspace = req.get('x-zedping-workspace-id')
-  const customerId = requestedWorkspace || (workspaces.size === 1 ? [...workspaces.keys()][0] : null)
-  if (!customerId) return res.status(400).json({ error: 'Select a workspace with x-zedping-workspace-id' })
-  const role = workspaces.get(customerId)
-  if (!role) return res.status(403).json({ error: 'You do not have access to this workspace' })
+  const selection = resolveWorkspaceSelection(workspaces, req.get('x-zedping-workspace-id'))
+  if (selection.kind === 'selection_required') {
+    return res.status(400).json({ error: 'Select a workspace with x-zedping-workspace-id' })
+  }
+  if (selection.kind === 'unauthorized') {
+    return res.status(403).json({ error: 'You do not have access to this workspace' })
+  }
 
-  req.workspace = { customerId, role, userId: user.id, emailVerified: Boolean(user.email_confirmed_at) }
+  req.workspace = {
+    customerId: selection.customerId,
+    role: selection.role,
+    userId: user.id,
+    emailVerified: Boolean(user.email_confirmed_at)
+  }
   next()
 }
 
