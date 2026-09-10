@@ -35,13 +35,30 @@ async function loadWorkspace(customerId) {
   return data
 }
 
+async function loadWhatsAppConnection(customerId) {
+  const { data, error } = await supabase
+    .from('whatsapp_numbers')
+    .select('phone_number, display_name, status, created_at')
+    .eq('customer_id', customerId)
+    .order('created_at', { ascending: false })
+  if (error) throw error
+
+  // The customer UI supports one number today. It receives only display-safe
+  // connection data; IDs and credentials remain confined to the backend.
+  return (data || []).find((number) => number.status === 'connected') || (data || [])[0] || null
+}
+
 router.get('/', async (req, res) => {
   try {
-    const workspace = await loadWorkspace(req.workspace.customerId)
+    const [workspace, whatsappConnection] = await Promise.all([
+      loadWorkspace(req.workspace.customerId),
+      loadWhatsAppConnection(req.workspace.customerId)
+    ])
     return res.json({
       workspace,
       role: req.workspace.role,
-      onboarding: onboardingFor(workspace, req.workspace.emailVerified)
+      onboarding: onboardingFor(workspace, req.workspace.emailVerified),
+      whatsapp_connection: whatsappConnection
     })
   } catch (error) {
     return res.status(500).json({ error: 'Unable to load this workspace' })
