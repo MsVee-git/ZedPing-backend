@@ -22,7 +22,7 @@ async function requireWorkspace(req, res, next) {
   const role = workspaces.get(customerId)
   if (!role) return res.status(403).json({ error: 'You do not have access to this workspace' })
 
-  req.workspace = { customerId, role, userId: user.id }
+  req.workspace = { customerId, role, userId: user.id, emailVerified: Boolean(user.email_confirmed_at) }
   next()
 }
 
