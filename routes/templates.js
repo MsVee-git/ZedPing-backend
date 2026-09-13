@@ -57,6 +57,76 @@ router.get('/', async (req, res) => {
   }
 })
 
+
+function readTemplateCreateBody(body) {
+  const allowed = ['name', 'category', 'language', 'body', 'variable_examples']
+  if (Object.keys(body).some((key) => !allowed.includes(key))) throw new MetaTemplateError('Invalid template create request')
+  if (typeof body.name !== 'string' || body.name.length > 100) throw new MetaTemplateError('Template name is required')
+  if (typeof body.category !== 'string' || body.category.length > 16) throw new MetaTemplateError('Template category is required')
+  if (typeof body.language !== 'string' || body.language.length > 10) throw new MetaTemplateError('Template language is required')
+  if (typeof body.body !== 'string' || body.body.length > 1024) throw new MetaTemplateError('Template body is required')
+  if (!Array.isArray(body.variable_examples) || body.variable_examples.length > 10 || body.variable_examples.some((value) => typeof value !== 'string' || value.length > 128)) {
+    throw new MetaTemplateError('Variable examples are invalid')
+  }
+  return {
+    name: body.name,
+    category: body.category,
+    language: body.language,
+    body: body.body,
+    variable_examples: body.variable_examples
+  }
+}
+
+router.post('/', requireAdmin, async (req, res) => {
+  let templateInput
+  try {
+    templateInput = readTemplateCreateBody(req.body || {})
+  } catch (error) {
+    return res.status(400).json({ error: error.message || 'Invalid template create request' })
+  }
+
+  try {
+    // The browser provides only draft text. The owning WABA and credentials
+    // are always resolved from the active, authorized workspace.
+    const resolved = await resolveConnectedNumber(req.workspace.customerId)
+    if (resolved.kind === 'none') return res.status(404).json({ error: 'No connected WhatsApp number is available for this workspace' })
+    if (resolved.kind === 'ambiguous') return res.status(409).json({ error: 'Select a WhatsApp number before creating a template' })
+    if (resolved.kind === 'invalid') return res.status(409).json({ error: 'The connected WhatsApp number is incomplete' })
+
+    const meta = createMetaTemplateClient()
+    const submitted = await meta.createTemplate({
+      wabaId: resolved.number.whatsapp_business_account_id,
+      accessToken: resolved.number.access_token,
+      template: templateInput
+    })
+    const validated = meta.buildTemplateSubmission(templateInput)
+    return res.status(201).json({
+      submitted: true,
+      template: {
+        id: submitted.id,
+        name: validated.name,
+        category: submitted.category || validated.category,
+        language: validated.language,
+        status: submitted.status,
+        components: validated.components
+      },
+      connection: {
+        display_name: resolved.number.display_name || null,
+        phone_number_id: resolved.number.phone_number_id
+      }
+    })
+  } catch (error) {
+    if (error instanceof MetaTemplateError) {
+      const status = error.kind === 'rejected' ? 422 : error.kind === 'upstream' ? 502 : 400
+      return res.status(status).json({
+        error: error.kind === 'rejected' ? 'Meta rejected the template submission' : error.message,
+        detail: error.kind === 'rejected' ? error.detail : null
+      })
+    }
+    return res.status(502).json({ error: 'Meta could not submit this template' })
+  }
+})
+
 router.post('/send', requireAdmin, async (req, res) => {
   const body = req.body || {}
   if (Object.keys(body).some((key) => !['template_id', 'to'].includes(key))) return res.status(400).json({ error: 'Invalid template send request' })
