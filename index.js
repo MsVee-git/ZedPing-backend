@@ -18,6 +18,7 @@ const automationRoutes = require('./routes/automations')
 const catalogRoutes = require('./routes/catalog')
 const orderRoutes = require('./routes/orders')
 const workspaceRoutes = require('./routes/workspace')
+const templateRoutes = require('./routes/templates')
 const whatsappConnectionRoutes = require('./routes/whatsappConnections')
 
 app.use('/webhook', webhookRoutes)
@@ -28,6 +29,7 @@ app.use('/automations', requireWorkspace, automationRoutes)
 app.use('/catalog', requireWorkspace, catalogRoutes)
 app.use('/orders', requireWorkspace, orderRoutes)
 app.use('/workspace', requireWorkspace, workspaceRoutes)
+app.use('/templates', requireWorkspace, templateRoutes)
 app.use('/whatsapp-connections', requireWorkspace, whatsappConnectionRoutes)
 
 app.get('/', (req, res) => {
