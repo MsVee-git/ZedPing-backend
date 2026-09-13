@@ -127,6 +127,41 @@ router.post('/', requireAdmin, async (req, res) => {
   }
 })
 
+
+router.delete('/', requireAdmin, async (req, res) => {
+  const body = req.body || {}
+  if (Object.keys(body).some((key) => key !== 'template_id')) return res.status(400).json({ error: 'Invalid template deletion request' })
+  if (typeof body.template_id !== 'string' || body.template_id.length < 1 || body.template_id.length > 64) return res.status(400).json({ error: 'A Meta template ID is required' })
+
+  try {
+    const result = await loadTemplates(req.workspace.customerId)
+    if (result.kind === 'none') return res.status(404).json({ error: 'No connected WhatsApp number is available for this workspace' })
+    if (result.kind === 'ambiguous') return res.status(409).json({ error: 'Select a WhatsApp number before deleting a template' })
+    if (result.kind === 'invalid') return res.status(409).json({ error: 'The connected WhatsApp number is incomplete' })
+
+    // The browser's ID is only a selector. Re-read this workspace-owned WABA
+    // from Meta before deriving the name used by Meta's deletion endpoint.
+    const template = result.templates.find((item) => String(item.id) === body.template_id)
+    if (!template?.name) return res.status(404).json({ error: 'This template is not available in the active workspace' })
+
+    await result.meta.deleteTemplate({
+      wabaId: result.number.whatsapp_business_account_id,
+      accessToken: result.number.access_token,
+      templateName: template.name
+    })
+    return res.json({ success: true, template: { id: String(template.id), name: template.name } })
+  } catch (error) {
+    if (error instanceof MetaTemplateError) {
+      const status = error.kind === 'rejected' ? 422 : error.kind === 'upstream' ? 502 : 400
+      return res.status(status).json({
+        error: error.kind === 'rejected' ? 'Meta rejected the template deletion' : error.message,
+        detail: error.kind === 'rejected' ? error.detail : null
+      })
+    }
+    return res.status(502).json({ error: 'Meta could not delete this template' })
+  }
+})
+
 router.post('/send', requireAdmin, async (req, res) => {
   const body = req.body || {}
   if (Object.keys(body).some((key) => !['template_id', 'to'].includes(key))) return res.status(400).json({ error: 'Invalid template send request' })
