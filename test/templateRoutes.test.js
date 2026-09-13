@@ -4,6 +4,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'templates.js'), 'utf8')
+const authSource = fs.readFileSync(path.join(__dirname, '..', 'middleware', 'auth.js'), 'utf8')
 
 test('template routes derive WABA and phone data only from the active workspace-owned connection', () => {
   assert.match(source, /\.eq\('customer_id', customerId\)/)
@@ -16,4 +17,15 @@ test('template routes derive WABA and phone data only from the active workspace-
   assert.doesNotMatch(source, /body\.phone_number_id/i)
   assert.doesNotMatch(source, /body\.access_token/i)
   assert.doesNotMatch(source, /body\.components/i)
+})
+
+test('template deletion is owner/admin-only and uses a live workspace-scoped Meta selector', () => {
+  assert.match(source, /router\.delete\('\/', requireAdmin/)
+  assert.match(source, /const result = await loadTemplates\(req\.workspace\.customerId\)/)
+  assert.match(source, /result\.templates\.find\(\(item\) => String\(item\.id\) === body\.template_id\)/)
+  assert.match(source, /templateName: template\.name/)
+  assert.match(authSource, /\['owner', 'admin'\]\.includes\(req\.workspace\.role\)/)
+  assert.doesNotMatch(source, /body\.waba/i)
+  assert.doesNotMatch(source, /body\.phone_number_id/i)
+  assert.doesNotMatch(source, /body\.access_token/i)
 })
