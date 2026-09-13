@@ -29,3 +29,38 @@ test('rejects malformed server-side WABA identifiers before Meta is called', asy
   await assert.rejects(() => client.listTemplates({ wabaId: 'not-a-waba' }), MetaTemplateError)
 })
 
+test('builds only safe body components and exact examples for a variable template', () => {
+  const client = createMetaTemplateClient({ env, http: {} })
+  assert.deepEqual(
+    client.buildTemplateSubmission({ name: 'booking_reminder', category: 'UTILITY', language: 'en_US', body: 'Hello {{1}}, your booking is {{2}}.', variable_examples: ['Ada', 'tomorrow'] }),
+    { name: 'booking_reminder', category: 'UTILITY', language: 'en_US', components: [{ type: 'BODY', text: 'Hello {{1}}, your booking is {{2}}.', example: { body_text: [['Ada', 'tomorrow']] } }] }
+  )
+  assert.throws(() => client.buildTemplateSubmission({ name: 'Bad Name', category: 'UTILITY', language: 'en_US', body: 'Hello', variable_examples: [] }), MetaTemplateError)
+  assert.throws(() => client.buildTemplateSubmission({ name: 'missing_examples', category: 'UTILITY', language: 'en_US', body: 'Hello {{1}}', variable_examples: [] }), MetaTemplateError)
+  assert.throws(() => client.buildTemplateSubmission({ name: 'skipped_variable', category: 'MARKETING', language: 'en_US', body: 'Hello {{2}}', variable_examples: ['Ada'] }), MetaTemplateError)
+})
+
+test('posts a server-built template to the workspace-resolved WABA through the configured version', async () => {
+  const calls = []
+  const client = createMetaTemplateClient({
+    env,
+    http: { post: async (url, body, config) => { calls.push({ url, body, config }); return { data: { id: 'meta-template-1', status: 'PENDING', category: 'UTILITY' } } } }
+  })
+  const result = await client.createTemplate({ wabaId: '2076393569963045', template: { name: 'booking_reminder', category: 'UTILITY', language: 'en_US', body: 'Your booking is confirmed.', variable_examples: [] } })
+  assert.deepEqual(result, { id: 'meta-template-1', status: 'PENDING', category: 'UTILITY' })
+  assert.match(calls[0].url, /\/v25\.0\/2076393569963045\/message_templates$/)
+  assert.equal(calls[0].config.headers.Authorization, 'Bearer server-only-token')
+  assert.deepEqual(calls[0].body.components, [{ type: 'BODY', text: 'Your booking is confirmed.' }])
+})
+
+test('returns a safe Meta rejection without credentials', async () => {
+  const client = createMetaTemplateClient({
+    env,
+    http: { post: async () => { const error = new Error('bad request'); error.response = { data: { error: { message: 'Name already exists. Bearer secret-must-not-leak' } } }; throw error } }
+  })
+  await assert.rejects(
+    () => client.createTemplate({ wabaId: '2076393569963045', template: { name: 'booking_reminder', category: 'UTILITY', language: 'en_US', body: 'Hello', variable_examples: [] } }),
+    (error) => error instanceof MetaTemplateError && error.kind === 'rejected' && !String(error.detail).includes('secret-must-not-leak')
+  )
+})
+
