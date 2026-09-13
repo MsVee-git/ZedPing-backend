@@ -65,3 +65,26 @@ test('returns a safe Meta rejection without credentials', async () => {
   )
 })
 
+test('deletes only a server-selected template name through the configured Meta API version', async () => {
+  const calls = []
+  const client = createMetaTemplateClient({
+    env,
+    http: { delete: async (url, config) => { calls.push({ url, config }); return { data: { success: true } } } }
+  })
+  await assert.doesNotReject(() => client.deleteTemplate({ wabaId: '2076393569963045', templateName: 'review_demo' }))
+  assert.match(calls[0].url, /\/v25\.0\/2076393569963045\/message_templates$/)
+  assert.equal(calls[0].config.params.name, 'review_demo')
+  assert.equal(calls[0].config.headers.Authorization, 'Bearer server-only-token')
+})
+
+test('returns a safe Meta deletion rejection without a credential', async () => {
+  const client = createMetaTemplateClient({
+    env,
+    http: { delete: async () => { const error = new Error('bad request'); error.response = { data: { error: { message: 'Template cannot be removed. Bearer secret-must-not-leak' } } }; throw error } }
+  })
+  await assert.rejects(
+    () => client.deleteTemplate({ wabaId: '2076393569963045', templateName: 'review_demo' }),
+    (error) => error instanceof MetaTemplateError && error.kind === 'rejected' && !String(error.detail).includes('secret-must-not-leak')
+  )
+})
+
