@@ -35,6 +35,7 @@ test('builds only safe body components and exact examples for a variable templat
     client.buildTemplateSubmission({ name: 'booking_reminder', category: 'UTILITY', language: 'en_US', body: 'Hello {{1}}, your booking is {{2}}.', variable_examples: ['Ada', 'tomorrow'] }),
     { name: 'booking_reminder', category: 'UTILITY', language: 'en_US', components: [{ type: 'BODY', text: 'Hello {{1}}, your booking is {{2}}.', example: { body_text: [['Ada', 'tomorrow']] } }] }
   )
+  assert.equal(client.buildTemplateSubmission({ name: 'repeat_variable', category: 'UTILITY', language: 'en_US', body: 'Hello {{1}}, we will see {{1}} soon.', variable_examples: ['Ada'] }).components[0].example.body_text[0][0], 'Ada')
   assert.throws(() => client.buildTemplateSubmission({ name: 'Bad Name', category: 'UTILITY', language: 'en_US', body: 'Hello', variable_examples: [] }), MetaTemplateError)
   assert.throws(() => client.buildTemplateSubmission({ name: 'missing_examples', category: 'UTILITY', language: 'en_US', body: 'Hello {{1}}', variable_examples: [] }), MetaTemplateError)
   assert.throws(() => client.buildTemplateSubmission({ name: 'skipped_variable', category: 'MARKETING', language: 'en_US', body: 'Hello {{2}}', variable_examples: ['Ada'] }), MetaTemplateError)
