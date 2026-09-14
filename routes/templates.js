@@ -5,6 +5,7 @@ const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
 const { createMetaTemplateClient, MetaTemplateError } = require('../lib/metaTemplates')
 const { sendTemplateMessage, uploadWhatsAppMedia } = require('../lib/whatsapp')
+const { validateTemplateHeaderMedia } = require('../lib/templateMedia')
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } })
 
@@ -26,17 +27,6 @@ function headerMediaFormat(template) {
   const header = (template?.components || []).find((component) => String(component.type || '').toUpperCase() === 'HEADER')
   const format = String(header?.format || '').toLowerCase()
   return ['image', 'document'].includes(format) ? format : null
-}
-
-function validHeaderMedia(file, type) {
-  if (!file || !file.buffer || file.size < 1) throw new MetaTemplateError('Select a valid ' + type + ' header file')
-  const bytes = file.buffer
-  const jpeg = bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
-  const png = bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
-  const pdf = bytes.length >= 5 && bytes.subarray(0, 5).toString('ascii') === '%PDF-'
-  if (type === 'image' && !(jpeg || png)) throw new MetaTemplateError('Image headers must be JPEG or PNG files')
-  if (type === 'document' && !pdf) throw new MetaTemplateError('Document headers must be PDF files')
-  return file
 }
 
 function safeRecipient(value) {
@@ -103,7 +93,7 @@ function readTemplateCreateBody(body, file) {
   const buttons = parseArray(body.buttons, 'Buttons')
   const headerType = String(body.header_type || 'none').toLowerCase()
   if (!['none', 'text', 'image', 'document'].includes(headerType)) throw new MetaTemplateError('Header type is invalid')
-  if (headerType === 'image' || headerType === 'document') validHeaderMedia(file, headerType)
+  if (headerType === 'image' || headerType === 'document') validateTemplateHeaderMedia(file, headerType)
   if (file && !['image', 'document'].includes(headerType)) throw new MetaTemplateError('Header media is only allowed for image or document headers')
   return {
     name: body.name, category: body.category, language: body.language, body: body.body,
