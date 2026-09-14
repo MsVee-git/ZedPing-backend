@@ -88,3 +88,23 @@ test('returns a safe Meta deletion rejection without a credential', async () => 
   )
 })
 
+test('builds image/document headers, footer and validated button components', () => {
+  const client = createMetaTemplateClient({ env, http: {} })
+  const image = client.buildTemplateSubmission({ name: 'image_offer', category: 'MARKETING', language: 'en_US', body: 'Hello', header_type: 'image', footer_text: 'Reply STOP to opt out', buttons: [{ type: 'url', text: 'View offer', url: 'https://zedping.app/offer' }, { type: 'quick_reply', text: 'Interested' }] }, { headerHandle: 'image-handle' })
+  assert.deepEqual(image.components[0], { type: 'HEADER', format: 'IMAGE', example: { header_handle: ['image-handle'] } })
+  assert.equal(image.components.at(-1).type, 'BUTTONS')
+  const document = client.buildTemplateSubmission({ name: 'invoice_pdf', category: 'UTILITY', language: 'en_US', body: 'Your invoice is ready', header_type: 'document', buttons: [{ type: 'phone_number', text: 'Call support', phone_number: '+260971234567' }] }, { headerHandle: 'document-handle' })
+  assert.deepEqual(document.components[0], { type: 'HEADER', format: 'DOCUMENT', example: { header_handle: ['document-handle'] } })
+  assert.throws(() => client.buildTemplateSubmission({ name: 'bad_url', category: 'MARKETING', language: 'en_US', body: 'Hello', buttons: [{ type: 'url', text: 'Open', url: 'javascript:alert(1)' }] }), MetaTemplateError)
+  assert.throws(() => client.buildTemplateSubmission({ name: 'bad_phone', category: 'UTILITY', language: 'en_US', body: 'Hello', buttons: [{ type: 'phone_number', text: 'Call', phone_number: '123' }] }), MetaTemplateError)
+})
+
+test('uploads a template header sample through the server-side Meta app upload flow', async () => {
+  const calls = []
+  const client = createMetaTemplateClient({ env: { ...env, META_APP_ID: '1234567890' }, http: { post: async (url, body, config) => { calls.push({ url, body, config }); return calls.length === 1 ? { data: { id: 'upload-session' } } : { data: { h: 'header-handle' } } } } })
+  const handle = await client.uploadTemplateHeaderMedia({ file: { buffer: Buffer.from('image'), size: 5, mimetype: 'image/jpeg', originalname: 'header.jpg' } })
+  assert.equal(handle, 'header-handle')
+  assert.match(calls[0].url, /\/v25\.0\/1234567890\/uploads$/)
+  assert.equal(calls[1].config.headers.Authorization, 'OAuth server-only-token')
+})
+
