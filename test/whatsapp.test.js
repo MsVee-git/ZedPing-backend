@@ -10,9 +10,9 @@ test('sends the Meta-selected language using the configured Graph API version', 
   const previous = process.env.META_GRAPH_API_VERSION
   process.env.META_GRAPH_API_VERSION = 'v25.0'
   try {
-    await sendTemplateMessage('1197262023469653', '260700000000', { name: 'review_demo', language: 'en_ZM' }, 'workspace-token')
+    await sendTemplateMessage('1197262023469653', '260700000000', { name: 'review_demo', language: 'en_ZM', headerMedia: { type: 'image', id: 'media-1' } }, 'workspace-token')
     assert.match(calls[0][0], /\/v25\.0\/1197262023469653\/messages$/)
-    assert.deepEqual(calls[0][1].template, { name: 'review_demo', language: { code: 'en_ZM' } })
+    assert.deepEqual(calls[0][1].template, { name: 'review_demo', language: { code: 'en_ZM' }, components: [{ type: 'header', parameters: [{ type: 'image', image: { id: 'media-1' } }] }] })
   } finally {
     axios.post = original
     if (previous === undefined) delete process.env.META_GRAPH_API_VERSION
