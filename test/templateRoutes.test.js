@@ -11,7 +11,7 @@ test('rich template routes remain owner/admin-only and workspace scoped', () => 
   assert.match(source, /router\.post\('\/send', requireAdmin, parseTemplateUpload/)
   assert.match(source, /router\.delete\('\/', requireAdmin/)
   assert.match(source, /const result = await loadTemplates\(req\.workspace\.customerId\)/)
-  assert.match(source, /validateTemplateHeaderMedia\\(file, headerType\\)/))
+  assert.match(source, /validateTemplateHeaderMedia\(file, headerType\)/)
   assert.match(source, /templateName: template\.name/)
   assert.match(mediaSource, /Image headers must be JPEG or PNG files/)
   assert.match(mediaSource, /Document headers must be PDF files/)
