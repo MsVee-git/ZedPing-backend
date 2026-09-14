@@ -1,9 +1,42 @@
 const express = require('express')
+const multer = require('multer')
 const router = express.Router()
 const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
 const { createMetaTemplateClient, MetaTemplateError } = require('../lib/metaTemplates')
-const { sendTemplateMessage } = require('../lib/whatsapp')
+const { sendTemplateMessage, uploadWhatsAppMedia } = require('../lib/whatsapp')
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } })
+
+function parseTemplateUpload(req, res, next) {
+  upload.single('header_media')(req, res, (error) => {
+    if (error) return res.status(400).json({ error: 'Header media must be one file up to 10 MB' })
+    next()
+  })
+}
+
+function parseArray(value, label) {
+  if (Array.isArray(value)) return value
+  if (typeof value !== 'string') throw new MetaTemplateError(label + ' is invalid')
+  try { const parsed = JSON.parse(value); if (!Array.isArray(parsed)) throw new Error('invalid'); return parsed } catch (_) { throw new MetaTemplateError(label + ' is invalid') }
+}
+
+function headerMediaFormat(template) {
+  const header = (template?.components || []).find((component) => String(component.type || '').toUpperCase() === 'HEADER')
+  const format = String(header?.format || '').toLowerCase()
+  return ['image', 'document'].includes(format) ? format : null
+}
+
+function validHeaderMedia(file, type) {
+  if (!file || !file.buffer || file.size < 1) throw new MetaTemplateError('Select a valid ' + type + ' header file')
+  const bytes = file.buffer
+  const jpeg = bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+  const png = bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  const pdf = bytes.length >= 5 && bytes.subarray(0, 5).toString('ascii') === '%PDF-'
+  if (type === 'image' && !(jpeg || png)) throw new MetaTemplateError('Image headers must be JPEG or PNG files')
+  if (type === 'document' && !pdf) throw new MetaTemplateError('Document headers must be PDF files')
+  return file
+}
 
 function safeRecipient(value) {
   const digits = String(value || '').replace(/\D/g, '')
@@ -58,29 +91,30 @@ router.get('/', async (req, res) => {
 })
 
 
-function readTemplateCreateBody(body) {
-  const allowed = ['name', 'category', 'language', 'body', 'variable_examples']
+function readTemplateCreateBody(body, file) {
+  const allowed = ['name', 'category', 'language', 'body', 'variable_examples', 'header_type', 'header_text', 'footer_text', 'buttons']
   if (Object.keys(body).some((key) => !allowed.includes(key))) throw new MetaTemplateError('Invalid template create request')
   if (typeof body.name !== 'string' || body.name.length > 100) throw new MetaTemplateError('Template name is required')
   if (typeof body.category !== 'string' || body.category.length > 16) throw new MetaTemplateError('Template category is required')
   if (typeof body.language !== 'string' || body.language.length > 10) throw new MetaTemplateError('Template language is required')
   if (typeof body.body !== 'string' || body.body.length > 1024) throw new MetaTemplateError('Template body is required')
-  if (!Array.isArray(body.variable_examples) || body.variable_examples.length > 10 || body.variable_examples.some((value) => typeof value !== 'string' || value.length > 128)) {
-    throw new MetaTemplateError('Variable examples are invalid')
-  }
+  const variableExamples = parseArray(body.variable_examples, 'Variable examples')
+  const buttons = parseArray(body.buttons, 'Buttons')
+  const headerType = String(body.header_type || 'none').toLowerCase()
+  if (!['none', 'text', 'image', 'document'].includes(headerType)) throw new MetaTemplateError('Header type is invalid')
+  if (headerType === 'image' || headerType === 'document') validHeaderMedia(file, headerType)
+  if (file && !['image', 'document'].includes(headerType)) throw new MetaTemplateError('Header media is only allowed for image or document headers')
   return {
-    name: body.name,
-    category: body.category,
-    language: body.language,
-    body: body.body,
-    variable_examples: body.variable_examples
+    name: body.name, category: body.category, language: body.language, body: body.body,
+    variable_examples: variableExamples, header_type: headerType, header_text: body.header_text || '',
+    footer_text: body.footer_text || '', buttons, header_media: file || null
   }
 }
 
-router.post('/', requireAdmin, async (req, res) => {
+router.post('/', requireAdmin, parseTemplateUpload, async (req, res) => {
   let templateInput
   try {
-    templateInput = readTemplateCreateBody(req.body || {})
+    templateInput = readTemplateCreateBody(req.body || {}, req.file)
   } catch (error) {
     return res.status(400).json({ error: error.message || 'Invalid template create request' })
   }
@@ -99,7 +133,7 @@ router.post('/', requireAdmin, async (req, res) => {
       accessToken: resolved.number.access_token,
       template: templateInput
     })
-    const validated = meta.buildTemplateSubmission(templateInput)
+    const validated = meta.buildTemplateSubmission(templateInput, { headerHandle: ['image', 'document'].includes(templateInput.header_type) ? 'uploaded-by-meta' : null })
     return res.status(201).json({
       submitted: true,
       template: {
@@ -162,7 +196,7 @@ router.delete('/', requireAdmin, async (req, res) => {
   }
 })
 
-router.post('/send', requireAdmin, async (req, res) => {
+router.post('/send', requireAdmin, parseTemplateUpload, async (req, res) => {
   const body = req.body || {}
   if (Object.keys(body).some((key) => !['template_id', 'to'].includes(key))) return res.status(400).json({ error: 'Invalid template send request' })
   if (typeof body.template_id !== 'string' || body.template_id.length < 1 || body.template_id.length > 64) return res.status(400).json({ error: 'A Meta template ID is required' })
@@ -179,10 +213,14 @@ router.post('/send', requireAdmin, async (req, res) => {
     // workspace-owned WABA before anything is sent.
     const template = result.templates.find((item) => String(item.id) === body.template_id)
     const approved = result.meta.approvedNoVariableTemplate(template)
+    const mediaType = headerMediaFormat(approved)
+    if (mediaType && !req.file) return res.status(400).json({ error: 'Select the required ' + mediaType + ' header media before sending' })
+    if (!mediaType && req.file) return res.status(400).json({ error: 'This template does not use media header content' })
+    const mediaId = mediaType ? await uploadWhatsAppMedia(result.number.phone_number_id, validHeaderMedia(req.file, mediaType), result.number.access_token) : null
     const metaResult = await sendTemplateMessage(
       result.number.phone_number_id,
       recipient,
-      { name: approved.name, language: approved.language },
+      { name: approved.name, language: approved.language, headerMedia: mediaType ? { type: mediaType, id: mediaId } : null },
       result.number.access_token
     )
     const metaMessageId = metaResult?.messages?.[0]?.id || null
