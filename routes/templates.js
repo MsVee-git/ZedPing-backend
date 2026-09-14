@@ -16,6 +16,7 @@ function parseTemplateUpload(req, res, next) {
 }
 
 function parseArray(value, label) {
+  if (value === undefined || value === null || value === '') return []
   if (Array.isArray(value)) return value
   if (typeof value !== 'string') throw new MetaTemplateError(label + ' is invalid')
   try { const parsed = JSON.parse(value); if (!Array.isArray(parsed)) throw new Error('invalid'); return parsed } catch (_) { throw new MetaTemplateError(label + ' is invalid') }
