@@ -170,7 +170,7 @@ router.post('/:id/take', async (req, res) => {
       .eq('customer_id', req.workspace.customerId)
       .eq('status', 'needs_attention')
       .eq('control_mode', 'needs_attention')
-      .is('assigned_user_id', null)
+      .or(`assigned_user_id.is.null,assigned_user_id.eq.${req.workspace.userId}`)
       .select(CONVERSATION_FIELDS)
       .maybeSingle()
     if (error) throw error
