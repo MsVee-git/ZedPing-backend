@@ -70,11 +70,35 @@ router.post('/send', async (req, res) => {
 
     const resolved = await recipientsForWorkspace(req.workspace.customerId, contacts)
     if (resolved.error) return res.status(resolved.status || 400).json({ error: resolved.error })
-    const results = await sendBroadcast(req.workspace.customerId, number, resolved.recipients, String(message).trim())
+    const messageBody = String(message).trim()
+    const { data: activity, error: activityError } = await supabase.from('scheduled_broadcasts').insert({
+      customer_id: req.workspace.customerId,
+      broadcast_name: String(req.body.broadcast_name || 'Immediate Broadcast').trim().slice(0, 160) || 'Immediate Broadcast',
+      contacts: resolved.recipients,
+      message: messageBody,
+      phone_number_id: number.phone_number_id,
+      scheduled_at: new Date().toISOString(),
+      status: 'sending'
+    }).select().single()
+    if (activityError) throw activityError
+
+    const results = await sendBroadcast(req.workspace.customerId, number, resolved.recipients, messageBody)
+    const acceptedCount = results.filter((item) => item.status === 'sent').length
+    const failedCount = results.filter((item) => item.status === 'failed').length
+    await supabase.from('scheduled_broadcasts').update({
+      // completed means processing/API submission attempts finished; it is not
+      // WhatsApp delivery confirmation, which remains on individual messages.
+      status: acceptedCount ? 'completed' : 'failed',
+      sent_count: acceptedCount,
+      failed_count: failedCount,
+      completed_at: new Date().toISOString()
+    }).eq('id', activity.id).eq('customer_id', req.workspace.customerId)
+
     return res.json({
       success: true,
-      sent: results.filter((item) => item.status === 'sent').length,
-      failed: results.filter((item) => item.status === 'failed').length,
+      activity_id: activity.id,
+      accepted: acceptedCount,
+      failed: failedCount,
       results
     })
   } catch {
