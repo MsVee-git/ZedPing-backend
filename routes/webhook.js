@@ -1,21 +1,227 @@
-const express=require('express')
-const crypto=require('crypto')
-const router=express.Router()
-const supabase=require('../lib/supabase')
-const {sendTextMessage}=require('../lib/whatsapp')
-const {getAIResponse}=require('../lib/openai')
+const express = require('express')
+const crypto = require('crypto')
+const router = express.Router()
+const supabase = require('../lib/supabase')
+const { sendTextMessage } = require('../lib/whatsapp')
+const { getAIResponse } = require('../lib/openai')
+const { shouldSuppressAutomation, stateForInbound } = require('../lib/conversationState')
+const { recordConversationEvent } = require('../lib/conversationEvents')
 
-router.get('/',(req,res)=>{const received=Buffer.from(String(req.query['hub.verify_token']||''));const expected=Buffer.from(String(process.env.VERIFY_TOKEN||''));const ok=req.query['hub.mode']==='subscribe'&&received.length===expected.length&&crypto.timingSafeEqual(received,expected);return ok?res.status(200).send(req.query['hub.challenge']):res.sendStatus(403)})
+router.get('/', (req, res) => {
+  const received = Buffer.from(String(req.query['hub.verify_token'] || ''))
+  const expected = Buffer.from(String(process.env.VERIFY_TOKEN || ''))
+  const ok = req.query['hub.mode'] === 'subscribe' && received.length === expected.length && crypto.timingSafeEqual(received, expected)
+  return ok ? res.status(200).send(req.query['hub.challenge']) : res.sendStatus(403)
+})
 
-function validSignature(req){const secret=process.env.META_APP_SECRET;const signature=req.get('x-hub-signature-256')||'';if(!secret||!signature.startsWith('sha256='))return false;const expected='sha256='+crypto.createHmac('sha256',secret).update(req.rawBody||'').digest('hex');return signature.length===expected.length&&crypto.timingSafeEqual(Buffer.from(signature),Buffer.from(expected))}
+function validSignature(req) {
+  const secret = process.env.META_APP_SECRET
+  const signature = req.get('x-hub-signature-256') || ''
+  if (!secret || !signature.startsWith('sha256=')) return false
+  const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(req.rawBody || '').digest('hex')
+  return signature.length === expected.length && crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
+}
 
-router.post('/',async(req,res)=>{if(!validSignature(req))return res.sendStatus(401);res.sendStatus(200);try{for(const entry of req.body.entry||[])for(const change of entry.changes||[]){const value=change.value||{};const phoneNumberId=value.metadata?.phone_number_id;if(!phoneNumberId)continue;const {data:number}=await supabase.from('whatsapp_numbers').select('*').eq('phone_number_id',phoneNumberId).eq('status','connected').maybeSingle();if(!number)continue;for(const incoming of value.messages||[])await processMessage({customerId:number.customer_id,number,from:incoming.from,body:incoming.text?.body||'',metaId:incoming.id})}}catch(error){console.error('Webhook processing error',error)}})
+router.post('/', async (req, res) => {
+  if (!validSignature(req)) return res.sendStatus(401)
+  res.sendStatus(200)
+  try {
+    for (const entry of req.body.entry || []) for (const change of entry.changes || []) {
+      const value = change.value || {}
+      const phoneNumberId = value.metadata?.phone_number_id
+      if (!phoneNumberId) continue
+      const { data: number } = await supabase.from('whatsapp_numbers').select('*')
+        .eq('phone_number_id', phoneNumberId).eq('status', 'connected').maybeSingle()
+      if (!number) continue
+      for (const incoming of value.messages || []) {
+        await processMessage({ customerId: number.customer_id, number, from: incoming.from, body: incoming.text?.body || '', metaId: incoming.id })
+      }
+    }
+  } catch (error) {
+    console.error('Webhook processing error', error)
+  }
+})
 
-async function processMessage(ctx){let {data:contact}=await supabase.from('contacts').select('*').eq('customer_id',ctx.customerId).eq('phone_number',ctx.from).maybeSingle();if(!contact){const {data,error}=await supabase.from('contacts').insert({customer_id:ctx.customerId,name:'',phone_number:ctx.from,custom_fields:{}}).select().single();if(error)throw error;contact=data}let {data:conversation}=await supabase.from('conversations').select('id').eq('customer_id',ctx.customerId).eq('whatsapp_number_id',ctx.number.id).eq('contact_id',contact.id).eq('status','open').maybeSingle();if(!conversation){const {data,error}=await supabase.from('conversations').insert({customer_id:ctx.customerId,whatsapp_number_id:ctx.number.id,contact_id:contact.id,status:'open'}).select('id').single();if(error)throw error;conversation=data}await supabase.from('messages').insert({customer_id:ctx.customerId,whatsapp_number_id:ctx.number.id,contact_id:contact.id,conversation_id:conversation.id,direction:'inbound',from_number:ctx.from,to_number:ctx.number.phone_number,message_body:ctx.body,status:'received',meta_message_id:ctx.metaId});if(await checkAISession(ctx))return;if(await checkFlowSession(ctx))return;await checkAutomations(ctx)}
+async function findOrCreateContact(ctx) {
+  let { data: contact } = await supabase.from('contacts').select('*')
+    .eq('customer_id', ctx.customerId).eq('phone_number', ctx.from).maybeSingle()
+  if (!contact) {
+    const { data, error } = await supabase.from('contacts').insert({
+      customer_id: ctx.customerId, name: '', phone_number: ctx.from, custom_fields: {}
+    }).select().single()
+    if (error) throw error
+    contact = data
+  }
+  return contact
+}
 
-async function outgoing(ctx,body){await sendTextMessage(ctx.number.phone_number_id,ctx.from,body,ctx.number.access_token);await supabase.from('messages').insert({customer_id:ctx.customerId,whatsapp_number_id:ctx.number.id,direction:'outbound',to_number:ctx.from,message_body:body,status:'sent'})}
-async function checkAutomations(ctx){const {data:list}=await supabase.from('automations').select('*').eq('customer_id',ctx.customerId).eq('trigger_type','keyword').eq('is_active',true);const text=ctx.body.trim().toUpperCase();const match=(list||[]).find(a=>(a.trigger_value||'').toUpperCase()===text)||(list||[]).find(a=>(a.trigger_value||'').toUpperCase()==='DEFAULT');if(!match)return;if(match.chatbot_flow_id)return startFlow(ctx,match.chatbot_flow_id);if((match.trigger_value||'').toUpperCase()==='CHAT'){const {data:agent}=await supabase.from('ai_agents').select('*').eq('customer_id',ctx.customerId).eq('whatsapp_number_id',ctx.number.id).eq('is_active',true).maybeSingle();if(agent)await supabase.from('ai_agent_sessions').insert({customer_id:ctx.customerId,whatsapp_number_id:ctx.number.id,agent_id:agent.id,contact_phone:ctx.from,status:'active'});return}await outgoing(ctx,match.message_template)}
-async function startFlow(ctx,flowId){const {data:flow}=await supabase.from('chatbot_flows').select('id').eq('id',flowId).eq('customer_id',ctx.customerId).eq('whatsapp_number_id',ctx.number.id).maybeSingle();if(!flow)return;const {data:step}=await supabase.from('chatbot_steps').select('*').eq('flow_id',flow.id).order('step_order').limit(1).maybeSingle();if(!step)return;await supabase.from('chatbot_sessions').delete().eq('customer_id',ctx.customerId).eq('contact_phone',ctx.from);await supabase.from('chatbot_sessions').insert({customer_id:ctx.customerId,whatsapp_number_id:ctx.number.id,contact_phone:ctx.from,flow_id:flow.id,current_step_id:step.id,status:'active'});await outgoing(ctx,step.message_body)}
-async function checkFlowSession(ctx){const {data:s}=await supabase.from('chatbot_sessions').select('*').eq('customer_id',ctx.customerId).eq('whatsapp_number_id',ctx.number.id).eq('contact_phone',ctx.from).eq('status','active').maybeSingle();if(!s)return false;const {data:route}=await supabase.from('chatbot_step_routes').select('*').eq('step_id',s.current_step_id).eq('match_value',ctx.body.trim().toUpperCase()).maybeSingle();if(!route){await supabase.from('chatbot_sessions').update({status:'ended'}).eq('id',s.id);return true}const {data:next}=await supabase.from('chatbot_steps').select('*').eq('id',route.next_step_id).maybeSingle();if(!next)return true;await supabase.from('chatbot_sessions').update({current_step_id:next.id}).eq('id',s.id);await outgoing(ctx,next.message_body);return true}
-async function checkAISession(ctx){const {data:s}=await supabase.from('ai_agent_sessions').select('*,ai_agents(*)').eq('customer_id',ctx.customerId).eq('whatsapp_number_id',ctx.number.id).eq('contact_phone',ctx.from).eq('status','active').maybeSingle();if(!s)return false;const a=s.ai_agents;if(!a||a.customer_id!==ctx.customerId)return false;const history=[...(s.messages||[]),{role:'user',content:ctx.body}];const reply=await getAIResponse(a.system_prompt,history,a);history.push({role:'assistant',content:reply});await supabase.from('ai_agent_sessions').update({messages:history,updated_at:new Date().toISOString()}).eq('id',s.id);await outgoing(ctx,reply);return true}
-module.exports=router
+async function findConversation(ctx, contact) {
+  const { data, error } = await supabase.from('conversations').select('*')
+    .eq('customer_id', ctx.customerId)
+    .eq('whatsapp_number_id', ctx.number.id)
+    .eq('contact_id', contact.id)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) throw error
+  return data || null
+}
+
+async function persistInbound(ctx, contact, conversation) {
+  const now = new Date().toISOString()
+  const state = stateForInbound(conversation)
+  if (!conversation) {
+    const { data, error } = await supabase.from('conversations').insert({
+      customer_id: ctx.customerId,
+      whatsapp_number_id: ctx.number.id,
+      contact_id: contact.id,
+      status: state.status,
+      control_mode: state.control_mode,
+      unread_count: 1,
+      last_message_at: now,
+      last_inbound_at: now
+    }).select().single()
+    if (error) throw error
+    conversation = data
+  } else {
+    const patch = {
+      status: state.status,
+      control_mode: state.control_mode,
+      assigned_user_id: state.assigned_user_id,
+      unread_count: Number(conversation.unread_count || 0) + 1,
+      last_message_at: now,
+      last_inbound_at: now,
+      updated_at: now
+    }
+    const query = supabase.from('conversations').update(patch).eq('id', conversation.id).eq('customer_id', ctx.customerId)
+    if (state.reopened) query.eq('status', 'resolved')
+    const { data, error } = await query.select().maybeSingle()
+    if (error) throw error
+    if (!data) throw new Error('Conversation state changed before inbound processing')
+    conversation = data
+    if (state.reopened) {
+      await recordConversationEvent({ customerId: ctx.customerId, conversationId: conversation.id, eventType: 'conversation_reopened_by_inbound' })
+    }
+  }
+
+  const { error: messageError } = await supabase.from('messages').insert({
+    customer_id: ctx.customerId,
+    whatsapp_number_id: ctx.number.id,
+    contact_id: contact.id,
+    conversation_id: conversation.id,
+    direction: 'inbound',
+    from_number: ctx.from,
+    to_number: ctx.number.phone_number,
+    message_body: ctx.body,
+    status: 'received',
+    meta_message_id: ctx.metaId
+  })
+  if (messageError) throw messageError
+  return conversation
+}
+
+async function processMessage(ctx) {
+  const contact = await findOrCreateContact(ctx)
+  const existing = await findConversation(ctx, contact)
+  const conversation = await persistInbound(ctx, contact, existing)
+  ctx.contact = contact
+  ctx.conversation = conversation
+
+  // This server-side guard is intentionally before AI, flow and keyword execution.
+  // Needs-attention and human conversations keep receiving/persisting inbound
+  // messages but cannot produce an automated response.
+  if (shouldSuppressAutomation(conversation)) return
+
+  if (await checkAISession(ctx)) return
+  if (await checkFlowSession(ctx)) return
+  await checkAutomations(ctx)
+}
+
+async function outgoing(ctx, body) {
+  await sendTextMessage(ctx.number.phone_number_id, ctx.from, body, ctx.number.access_token)
+  const now = new Date().toISOString()
+  const { error } = await supabase.from('messages').insert({
+    customer_id: ctx.customerId,
+    whatsapp_number_id: ctx.number.id,
+    contact_id: ctx.contact?.id || null,
+    conversation_id: ctx.conversation?.id || null,
+    direction: 'outbound',
+    to_number: ctx.from,
+    message_body: body,
+    status: 'sent'
+  })
+  if (error) throw error
+  if (ctx.conversation?.id) {
+    await supabase.from('conversations').update({ last_message_at: now, last_outbound_at: now, updated_at: now })
+      .eq('id', ctx.conversation.id).eq('customer_id', ctx.customerId)
+  }
+}
+
+async function checkAutomations(ctx) {
+  const { data: list } = await supabase.from('automations').select('*')
+    .eq('customer_id', ctx.customerId).eq('trigger_type', 'keyword').eq('is_active', true)
+  const text = ctx.body.trim().toUpperCase()
+  const match = (list || []).find((automation) => (automation.trigger_value || '').toUpperCase() === text)
+    || (list || []).find((automation) => (automation.trigger_value || '').toUpperCase() === 'DEFAULT')
+  if (!match) return
+  if (match.chatbot_flow_id) return startFlow(ctx, match.chatbot_flow_id)
+  if ((match.trigger_value || '').toUpperCase() === 'CHAT') {
+    const { data: agent } = await supabase.from('ai_agents').select('*')
+      .eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).eq('is_active', true).maybeSingle()
+    if (agent) await supabase.from('ai_agent_sessions').insert({
+      customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, agent_id: agent.id, contact_phone: ctx.from, status: 'active'
+    })
+    return
+  }
+  await outgoing(ctx, match.message_template)
+}
+
+async function startFlow(ctx, flowId) {
+  const { data: flow } = await supabase.from('chatbot_flows').select('id')
+    .eq('id', flowId).eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).maybeSingle()
+  if (!flow) return
+  const { data: step } = await supabase.from('chatbot_steps').select('*').eq('flow_id', flow.id)
+    .order('step_order').limit(1).maybeSingle()
+  if (!step) return
+  await supabase.from('chatbot_sessions').delete().eq('customer_id', ctx.customerId).eq('contact_phone', ctx.from)
+  await supabase.from('chatbot_sessions').insert({
+    customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, contact_phone: ctx.from,
+    flow_id: flow.id, current_step_id: step.id, status: 'active'
+  })
+  await outgoing(ctx, step.message_body)
+}
+
+async function checkFlowSession(ctx) {
+  const { data: session } = await supabase.from('chatbot_sessions').select('*')
+    .eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id)
+    .eq('contact_phone', ctx.from).eq('status', 'active').maybeSingle()
+  if (!session) return false
+  const { data: route } = await supabase.from('chatbot_step_routes').select('*')
+    .eq('step_id', session.current_step_id).eq('match_value', ctx.body.trim().toUpperCase()).maybeSingle()
+  if (!route) {
+    await supabase.from('chatbot_sessions').update({ status: 'ended' }).eq('id', session.id)
+    return true
+  }
+  const { data: next } = await supabase.from('chatbot_steps').select('*').eq('id', route.next_step_id).maybeSingle()
+  if (!next) return true
+  await supabase.from('chatbot_sessions').update({ current_step_id: next.id }).eq('id', session.id)
+  await outgoing(ctx, next.message_body)
+  return true
+}
+
+async function checkAISession(ctx) {
+  const { data: session } = await supabase.from('ai_agent_sessions').select('*,ai_agents(*)')
+    .eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id)
+    .eq('contact_phone', ctx.from).eq('status', 'active').maybeSingle()
+  if (!session) return false
+  const agent = session.ai_agents
+  if (!agent || agent.customer_id !== ctx.customerId) return false
+  const history = [...(session.messages || []), { role: 'user', content: ctx.body }]
+  const reply = await getAIResponse(agent.system_prompt, history, agent)
+  history.push({ role: 'assistant', content: reply })
+  await supabase.from('ai_agent_sessions').update({ messages: history, updated_at: new Date().toISOString() }).eq('id', session.id)
+  await outgoing(ctx, reply)
+  return true
+}
+
+module.exports = router
