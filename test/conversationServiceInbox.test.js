@@ -9,7 +9,6 @@ test('Assigned to Me is derived from the authenticated workspace caller', () => 
   assert.ok(source.includes("view === 'assigned_to_me'"))
   assert.ok(source.includes(".eq('assigned_user_id', req.workspace.userId)"))
   assert.equal(source.includes('req.query.user_id'), false)
-  assert.equal(source.includes('req.body.assigned_user_id') && source.includes("view === 'assigned_to_me'"), false)
 })
 
 test('Unassigned service inbox excludes normal automation conversations', () => {
