@@ -19,3 +19,11 @@ test('team inbox reply derives connection and contact from the conversation', ()
   assert.equal(source.includes('req.body.phoneNumberId'), false)
   assert.equal(source.includes('req.body.waba'), false)
 })
+
+test('take operation is conditional so a concurrent user cannot overwrite the assignee', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'conversations.js'), 'utf8')
+  assert.ok(source.includes(".eq('status', 'needs_attention')"))
+  assert.ok(source.includes(".eq('control_mode', 'needs_attention')"))
+  assert.ok(source.includes('assigned_user_id.is.null,assigned_user_id.eq.'))
+  assert.ok(source.includes('return res.status(409)'))
+})
