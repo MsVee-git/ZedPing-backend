@@ -62,3 +62,63 @@ test('requires Meta webhook subscription confirmation before a connection can su
   })
   await assert.rejects(() => client.subscribeApp('100'), MetaSignupError)
 })
+
+
+test('emits stage diagnostics without access tokens or raw Meta responses', async () => {
+  const diagnostics = []
+  const client = createMetaEmbeddedSignupClient({
+    env,
+    diagnostic: (record) => diagnostics.push(record),
+    http: {
+      async get(url) {
+        if (url.includes('oauth/access_token')) return { data: { access_token: 'temporary-token-not-for-logs' } }
+        if (url.includes('debug_token')) {
+          return { data: { data: { granular_scopes: [{ scope: 'whatsapp_business_management', target_ids: ['100'] }] } } }
+        }
+        return { data: { data: [{ id: '200', display_phone_number: '+260 700 000 000' }] } }
+      },
+      async post() { return { data: { success: true } } }
+    }
+  })
+
+  const token = await client.exchangeCode('authorization-code-not-for-logs')
+  const connection = await client.validatePhoneOwnership({ accessToken: token, phoneNumberId: '200' })
+  await client.subscribeApp(connection.wabaId)
+
+  assert.deepEqual(diagnostics.map((record) => [record.stage, record.success]), [
+    ['code_exchange', true],
+    ['token_debug', true],
+    ['phone_ownership_validation', true],
+    ['phone_metadata', true],
+    ['waba_subscription', true]
+  ])
+  assert.equal(JSON.stringify(diagnostics).includes('temporary-token-not-for-logs'), false)
+  assert.equal(JSON.stringify(diagnostics).includes('authorization-code-not-for-logs'), false)
+})
+
+test('classifies Meta API failures separately from ZedPing validation failures', async () => {
+  const diagnostics = []
+  const client = createMetaEmbeddedSignupClient({
+    env,
+    diagnostic: (record) => diagnostics.push(record),
+    http: {
+      async get() {
+        const error = new Error('request failed')
+        error.response = { status: 400, data: { error: { code: 190, type: 'OAuthException', message: 'Invalid OAuth access token.' } } }
+        throw error
+      }
+    }
+  })
+
+  await assert.rejects(() => client.exchangeCode('authorization-code-not-for-logs'))
+  assert.deepEqual(diagnostics[0], {
+    event: 'embedded_signup_diagnostic',
+    stage: 'code_exchange',
+    success: false,
+    source: 'meta_api',
+    http_status: 400,
+    meta_error_code: 190,
+    meta_error_type: 'OAuthException',
+    meta_error_message: 'Invalid OAuth access token.'
+  })
+})
