@@ -21,6 +21,7 @@ const workspaceRoutes = require('./routes/workspace')
 const templateRoutes = require('./routes/templates')
 const whatsappConnectionRoutes = require('./routes/whatsappConnections')
 const conversationRoutes = require('./routes/conversations')
+const contentRoutes = require('./routes/content')
 
 app.use('/webhook', webhookRoutes)
 app.use('/messages', requireWorkspace, messageRoutes)
@@ -33,6 +34,7 @@ app.use('/workspace', requireWorkspace, workspaceRoutes)
 app.use('/templates', requireWorkspace, templateRoutes)
 app.use('/whatsapp-connections', requireWorkspace, whatsappConnectionRoutes)
 app.use('/conversations', requireWorkspace, conversationRoutes)
+app.use('/content', requireWorkspace, contentRoutes)
 
 app.get('/', (req, res) => {
   res.json({ status: 'ZedPing backend is running' })
