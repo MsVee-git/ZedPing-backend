@@ -88,11 +88,26 @@ router.get('/members', async (req, res) => {
 
 router.get('/', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('conversations')
+    const view = String(req.query.view || 'all')
+    if (!['all', 'assigned_to_me', 'unassigned_human'].includes(view)) {
+      return res.status(400).json({ error: 'Conversation view is invalid' })
+    }
+    let query = supabase.from('conversations')
       .select(CONVERSATION_FIELDS)
       .eq('customer_id', req.workspace.customerId)
       .order('last_message_at', { ascending: false, nullsFirst: false })
       .limit(100)
+
+    // These service-inbox views are derived from the verified caller, never
+    // from a browser-supplied member ID.
+    if (view === 'assigned_to_me') {
+      query = query.eq('assigned_user_id', req.workspace.userId).eq('status', 'open').eq('control_mode', 'human')
+    }
+    if (view === 'unassigned_human') {
+      query = query.is('assigned_user_id', null).eq('status', 'needs_attention').eq('control_mode', 'needs_attention')
+    }
+
+    const { data, error } = await query
     if (error) throw error
     const previews = await lastMessages(req.workspace.customerId, (data || []).map((conversation) => conversation.id))
     return res.json((data || []).map((conversation) => ({ ...conversation, last_message: previews.get(conversation.id) || null })))
@@ -225,6 +240,35 @@ router.post('/:id/resolve', async (req, res) => {
     return res.json({ conversation: data })
   } catch {
     return res.status(500).json({ error: 'Unable to resolve this conversation' })
+  }
+})
+
+router.post('/:id/reopen', async (req, res) => {
+  try {
+    const now = new Date().toISOString()
+    const { data, error } = await supabase.from('conversations').update({
+      status: 'open',
+      control_mode: 'human',
+      assigned_user_id: req.workspace.userId,
+      taken_over_at: now,
+      resolved_at: null,
+      resolved_by_user_id: null,
+      updated_at: now
+    }).eq('id', req.params.id)
+      .eq('customer_id', req.workspace.customerId)
+      .eq('status', 'resolved')
+      .select(CONVERSATION_FIELDS)
+      .maybeSingle()
+    if (error) throw error
+    if (!data) {
+      const current = await getConversation(req.workspace.customerId, req.params.id)
+      if (!current) return res.status(404).json({ error: 'Conversation not found' })
+      return res.status(409).json({ error: 'This conversation is no longer resolved', conversation: current })
+    }
+    await recordConversationEvent({ customerId: req.workspace.customerId, conversationId: data.id, actorUserId: req.workspace.userId, eventType: 'conversation_reopened_by_human' })
+    return res.json({ conversation: data })
+  } catch {
+    return res.status(500).json({ error: 'Unable to reopen this conversation' })
   }
 })
 
