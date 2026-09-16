@@ -185,3 +185,48 @@ test('emits aggregate ownership diagnostics without identifiers, numbers, tokens
     '555500001111'
   ]) assert.equal(output.includes(sensitiveValue), false)
 })
+
+
+test('ownership lookup redacts identifier-like Meta errors and records only aggregate failure metrics', async () => {
+  const diagnostics = []
+  const client = createMetaEmbeddedSignupClient({
+    env,
+    diagnostic: (record) => diagnostics.push(record),
+    http: {
+      async get(url) {
+        if (url.includes('debug_token')) {
+          return { data: { data: { granular_scopes: [{ scope: 'whatsapp_business_management', target_ids: ['993311773355'] }] } } }
+        }
+        const error = new Error('request failed')
+        error.response = {
+          status: 400,
+          data: { error: { code: 100, type: 'OAuthException', message: 'Phone 771199335577 and +260700111222 are unavailable' } }
+        }
+        throw error
+      }
+    }
+  })
+
+  await assert.rejects(
+    () => client.validatePhoneOwnership({ accessToken: 'temporary-access-token-should-never-appear', phoneNumberId: '555500001111' })
+  )
+
+  const record = diagnostics.at(-1)
+  assert.equal(record.stage, 'phone_ownership_lookup')
+  assert.equal(record.success, false)
+  assert.equal(record.source, 'meta_api')
+  assert.equal(record.authorized_waba_count, 1)
+  assert.equal(record.wabas_phone_listed_count, 0)
+  assert.equal(record.total_phone_records_returned, 0)
+  assert.equal(record.ownership_match_count, 0)
+  assert.equal(record.phone_list_api_failures_count, 1)
+  assert.equal(record.selected_phone_found, false)
+  assert.equal(record.selected_phone_found_in_multiple_wabas, false)
+  assert.equal(record.selected_phone_has_display_number, false)
+  assert.equal(record.selected_phone_code_verification_status, null)
+
+  const output = JSON.stringify(record)
+  for (const sensitiveValue of ['993311773355', '771199335577', '+260700111222', 'temporary-access-token-should-never-appear', '555500001111']) {
+    assert.equal(output.includes(sensitiveValue), false)
+  }
+})
