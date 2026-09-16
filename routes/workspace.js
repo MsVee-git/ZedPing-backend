@@ -2,6 +2,8 @@ const express = require('express')
 const router = express.Router()
 const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
+const { validateDiscovery } = require('../lib/onboardingDiscovery')
+const { recommendationsFor } = require('../lib/onboardingRecommendations')
 
 const PROFILE_FIELDS = ['business_name', 'contact_person', 'phone', 'country', 'industry', 'email']
 const WORKSPACE_COLUMNS = 'id, business_name, contact_person, phone, country, industry, email, subscription_plan, subscription_status, profile_completed_at, whatsapp_connected_at, onboarding_completed_at, onboarding_status, onboarded'
@@ -35,6 +37,43 @@ async function loadWorkspace(customerId) {
   return data
 }
 
+async function loadDiscovery(customerId) {
+  const { data, error } = await supabase
+    .from('workspace_discovery')
+    .select('goals, team_size, contact_sources, completed_at, created_at, updated_at')
+    .eq('customer_id', customerId)
+    .maybeSingle()
+  if (error) throw error
+  return data || null
+}
+
+async function checklistFor(customerId, workspace) {
+  const [connectionResult, contactsResult, groupsResult, automationsResult, broadcastsResult] = await Promise.all([
+    supabase.from('whatsapp_numbers').select('id', { count: 'exact', head: true }).eq('customer_id', customerId).eq('status', 'connected'),
+    supabase.from('contacts').select('id', { count: 'exact', head: true }).eq('customer_id', customerId),
+    supabase.from('contact_groups').select('id', { count: 'exact', head: true }).eq('customer_id', customerId),
+    supabase.from('automations').select('id', { count: 'exact', head: true }).eq('customer_id', customerId),
+    supabase.from('scheduled_broadcasts').select('id', { count: 'exact', head: true }).eq('customer_id', customerId)
+  ])
+  for (const result of [connectionResult, contactsResult, groupsResult, automationsResult, broadcastsResult]) {
+    if (result.error) throw result.error
+  }
+
+  const items = [
+    { key: 'profile', label: 'Complete business profile', complete: Boolean(workspace.profile_completed_at) },
+    { key: 'whatsapp', label: 'Connect WhatsApp', complete: Boolean(connectionResult.count) },
+    { key: 'contacts', label: 'Add or import contacts', complete: Number(contactsResult.count || 0) > 0 },
+    { key: 'segment', label: 'Create your first segment', complete: Number(groupsResult.count || 0) > 0 },
+    { key: 'automation', label: 'Choose your first automation', complete: Number(automationsResult.count || 0) > 0 },
+    // Template status is Meta-controlled and intentionally not fetched while the
+    // dashboard loads. It remains incomplete until the customer reviews it there.
+    { key: 'template', label: 'Review an approved template', complete: false, needs_template_review: true },
+    { key: 'broadcast', label: 'Send your first broadcast', complete: Number(broadcastsResult.count || 0) > 0 }
+  ]
+  const completed = items.filter((item) => item.complete).length
+  return { items, completed, total: items.length, presentation: completed >= 4 ? 'secondary' : 'primary' }
+}
+
 async function loadWhatsAppConnection(customerId) {
   const { data, error } = await supabase
     .from('whatsapp_numbers')
@@ -50,18 +89,48 @@ async function loadWhatsAppConnection(customerId) {
 
 router.get('/', async (req, res) => {
   try {
-    const [workspace, whatsappConnection] = await Promise.all([
+    const [workspace, whatsappConnection, discovery] = await Promise.all([
       loadWorkspace(req.workspace.customerId),
-      loadWhatsAppConnection(req.workspace.customerId)
+      loadWhatsAppConnection(req.workspace.customerId),
+      loadDiscovery(req.workspace.customerId)
     ])
+    const checklist = await checklistFor(req.workspace.customerId, workspace)
     return res.json({
       workspace,
       role: req.workspace.role,
       onboarding: onboardingFor(workspace, req.workspace.emailVerified),
-      whatsapp_connection: whatsappConnection
+      whatsapp_connection: whatsappConnection,
+      discovery,
+      recommendations: recommendationsFor({ industry: workspace.industry, goals: discovery?.goals || [] }),
+      setup_checklist: checklist
     })
   } catch (error) {
     return res.status(500).json({ error: 'Unable to load this workspace' })
+  }
+})
+
+router.patch('/discovery', requireAdmin, async (req, res) => {
+  try {
+    const discovery = validateDiscovery(req.body || {})
+    const { data, error } = await supabase
+      .from('workspace_discovery')
+      .upsert({
+        customer_id: req.workspace.customerId,
+        ...discovery,
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'customer_id' })
+      .select('goals, team_size, contact_sources, completed_at, created_at, updated_at')
+      .single()
+    if (error) throw error
+
+    const workspace = await loadWorkspace(req.workspace.customerId)
+    return res.json({
+      discovery: data,
+      recommendations: recommendationsFor({ industry: workspace.industry, goals: data.goals })
+    })
+  } catch (error) {
+    return res.status(400).json({ error: error.message || 'Invalid onboarding discovery details' })
   }
 })
 
