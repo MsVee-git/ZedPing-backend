@@ -87,8 +87,8 @@ test('emits stage diagnostics without access tokens or raw Meta responses', asyn
 
   assert.deepEqual(diagnostics.map((record) => [record.stage, record.success]), [
     ['code_exchange', true],
-    ['token_debug', true],
-    ['phone_ownership_validation', true],
+    ['token_waba_authorization', true],
+    ['phone_ownership_lookup', true],
     ['phone_metadata', true],
     ['waba_subscription', true]
   ])
@@ -121,4 +121,67 @@ test('classifies Meta API failures separately from ZedPing validation failures',
     meta_error_type: 'OAuthException',
     meta_error_message: 'Invalid OAuth access token.'
   })
+})
+
+
+test('emits aggregate ownership diagnostics without identifiers, numbers, tokens, or payloads', async () => {
+  const diagnostics = []
+  const client = createMetaEmbeddedSignupClient({
+    env,
+    diagnostic: (record) => diagnostics.push(record),
+    http: {
+      async get(url) {
+        if (url.includes('debug_token')) {
+          return {
+            data: {
+              data: {
+                granular_scopes: [{
+                  scope: 'whatsapp_business_management',
+                  target_ids: ['993311773355', '884422119977']
+                }]
+              }
+            }
+          }
+        }
+        if (url.includes('993311773355/phone_numbers')) {
+          return {
+            data: {
+              data: [{ id: '771199335577', display_phone_number: '+260700111222', code_verification_status: 'VERIFIED' }]
+            }
+          }
+        }
+        return { data: { data: [{ id: '663388994411', display_phone_number: '+260700333444' }] } }
+      }
+    }
+  })
+
+  await assert.rejects(
+    () => client.validatePhoneOwnership({ accessToken: 'temporary-access-token-should-never-appear', phoneNumberId: '555500001111' }),
+    MetaSignupError
+  )
+
+  const record = diagnostics.at(-1)
+  assert.equal(record.stage, 'phone_ownership_lookup')
+  assert.equal(record.success, false)
+  assert.equal(record.authorized_waba_count, 2)
+  assert.equal(record.wabas_phone_listed_count, 2)
+  assert.equal(record.total_phone_records_returned, 2)
+  assert.equal(record.ownership_match_count, 0)
+  assert.equal(record.selected_phone_found, false)
+  assert.equal(record.selected_phone_found_in_multiple_wabas, false)
+  assert.equal(record.phone_list_api_failures_count, 0)
+  assert.equal(record.selected_phone_has_display_number, false)
+  assert.equal(record.selected_phone_code_verification_status, null)
+
+  const output = JSON.stringify(diagnostics)
+  for (const sensitiveValue of [
+    '993311773355',
+    '884422119977',
+    '771199335577',
+    '663388994411',
+    '+260700111222',
+    '+260700333444',
+    'temporary-access-token-should-never-appear',
+    '555500001111'
+  ]) assert.equal(output.includes(sensitiveValue), false)
 })
