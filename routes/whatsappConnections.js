@@ -3,7 +3,7 @@ const crypto = require('crypto')
 const router = express.Router()
 const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
-const { createMetaEmbeddedSignupClient, MetaSignupError } = require('../lib/metaEmbeddedSignup')
+const { createMetaEmbeddedSignupClient, MetaSignupError, emitEmbeddedSignupDiagnostic } = require('../lib/metaEmbeddedSignup')
 
 const SESSION_TTL_MINUTES = 15
 const PHONE_NUMBER_ID_PATTERN = /^[0-9]{5,32}$/
@@ -30,6 +30,13 @@ function invalidCompletionBody(body) {
   if (typeof body.code !== 'string' || body.code.length < 5 || body.code.length > 4096) return 'Invalid Embedded Signup result'
   if (!PHONE_NUMBER_ID_PATTERN.test(String(body.phone_number_id || ''))) return 'Invalid Embedded Signup result'
   return null
+}
+
+function emitPersistenceReady(success, error) {
+  emitEmbeddedSignupDiagnostic(
+    { stage: 'persistence_ready', success, ...(error ? { error } : {}) },
+    (record) => console.info(JSON.stringify(record))
+  )
 }
 
 async function loadCompletedConnection(session, customerId) {
@@ -107,11 +114,18 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
     const temporaryToken = await meta.exchangeCode(code)
     const validated = await meta.validatePhoneOwnership({ accessToken: temporaryToken, phoneNumberId })
     const conflict = await findConflict(req.workspace.customerId, validated.phoneNumberId, validated.wabaId, validated.displayPhoneNumber)
-    if (conflict.kind === 'foreign') return res.status(409).json({ error: 'This WhatsApp number is already connected to another workspace' })
-    if (conflict.kind === 'mismatch') return res.status(409).json({ error: 'This WhatsApp number has conflicting existing connection data' })
+    if (conflict.kind === 'foreign') {
+      emitPersistenceReady(false, new MetaSignupError('This WhatsApp number is already connected to another workspace'))
+      return res.status(409).json({ error: 'This WhatsApp number is already connected to another workspace' })
+    }
+    if (conflict.kind === 'mismatch') {
+      emitPersistenceReady(false, new MetaSignupError('This WhatsApp number has conflicting existing connection data'))
+      return res.status(409).json({ error: 'This WhatsApp number has conflicting existing connection data' })
+    }
 
     // The platform token stays server-side; the temporary Embedded Signup token is never stored or returned.
     await meta.subscribeApp(validated.wabaId)
+    emitPersistenceReady(true)
 
     let connection = conflict.record
     if (!connection) {
