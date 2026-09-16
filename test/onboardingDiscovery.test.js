@@ -26,3 +26,9 @@ test('returns education recommendations for relevant discovery data', () => {
   assert.equal(result.packs[0].id, 'school-starter-pack')
   assert.ok(result.automations.some((item) => item.id === 'human-handoff'))
 })
+
+test('does not show every industry pack when no industry or goal was chosen', () => {
+  const result = recommendationsFor({ industry: '', goals: [] })
+  assert.deepEqual(result.packs, [])
+  assert.deepEqual(result.automations, [])
+})
