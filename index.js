@@ -9,7 +9,7 @@ app.use(express.json({
   }
 }))
 
-const { requireWorkspace } = require('./middleware/auth')
+const { requireWorkspace, requireAuthenticated } = require('./middleware/auth')
 const webhookRoutes = require('./routes/webhook')
 const messageRoutes = require('./routes/messages')
 const contactRoutes = require('./routes/contacts')
@@ -22,8 +22,10 @@ const templateRoutes = require('./routes/templates')
 const whatsappConnectionRoutes = require('./routes/whatsappConnections')
 const conversationRoutes = require('./routes/conversations')
 const contentRoutes = require('./routes/content')
+const { router: teamRoutes, acceptInvitation } = require('./routes/team')
 
 app.use('/webhook', webhookRoutes)
+app.post('/invitations/accept', requireAuthenticated, acceptInvitation)
 app.use('/messages', requireWorkspace, messageRoutes)
 app.use('/contacts', requireWorkspace, contactRoutes)
 app.use('/broadcasts', requireWorkspace, broadcastRoutes)
@@ -35,6 +37,7 @@ app.use('/templates', requireWorkspace, templateRoutes)
 app.use('/whatsapp-connections', requireWorkspace, whatsappConnectionRoutes)
 app.use('/conversations', requireWorkspace, conversationRoutes)
 app.use('/content', requireWorkspace, contentRoutes)
+app.use('/team', requireWorkspace, teamRoutes)
 
 app.get('/', (req, res) => {
   res.json({ status: 'ZedPing backend is running' })
