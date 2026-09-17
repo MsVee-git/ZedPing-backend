@@ -1,13 +1,33 @@
 const supabase = require('../lib/supabase')
 const { resolveWorkspaceSelection } = require('./workspaceSelection')
 
-async function requireWorkspace(req, res, next) {
+async function authenticateRequest(req, res) {
   const header = req.get('authorization') || ''
   const token = header.startsWith('Bearer ') ? header.slice(7) : null
-  if (!token) return res.status(401).json({ error: 'Authentication required' })
+  if (!token) {
+    res.status(401).json({ error: 'Authentication required' })
+    return null
+  }
 
   const { data: { user }, error: authError } = await supabase.auth.getUser(token)
-  if (authError || !user) return res.status(401).json({ error: 'Invalid or expired session' })
+  if (authError || !user) {
+    res.status(401).json({ error: 'Invalid or expired session' })
+    return null
+  }
+
+  req.authUser = user
+  return user
+}
+
+async function requireAuthenticated(req, res, next) {
+  const user = await authenticateRequest(req, res)
+  if (!user) return
+  next()
+}
+
+async function requireWorkspace(req, res, next) {
+  const user = await authenticateRequest(req, res)
+  if (!user) return
 
   const [{ data: owned }, { data: memberships }] = await Promise.all([
     supabase.from('customers').select('id').eq('auth_user_id', user.id),
@@ -43,4 +63,4 @@ function requireAdmin(req, res, next) {
   next()
 }
 
-module.exports = { requireWorkspace, requireAdmin }
+module.exports = { requireWorkspace, requireAdmin, requireAuthenticated }
