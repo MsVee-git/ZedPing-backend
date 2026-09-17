@@ -259,16 +259,26 @@ async function acceptInvitation(req, res) {
     const tokenHash = hashInvitationToken(token)
     const { data: invitation, error } = await supabase.from('workspace_invitations').select('*').eq('token_hash', tokenHash).maybeSingle()
     if (error) throw error
-    if (!invitation || invitation.status !== 'pending') return res.status(400).json({ error: 'Invitation is invalid, revoked, or already completed' })
-    if (isExpired(invitation.expires_at)) {
-      await supabase.from('workspace_invitations').update({ status: 'expired', updated_at: new Date().toISOString() }).eq('id', invitation.id).eq('status', 'pending')
-      return res.status(410).json({ error: 'This invitation has expired' })
-    }
+    if (!invitation) return res.status(400).json({ error: 'Invitation is invalid, revoked, or already completed' })
     const email = normalizeEmail(req.authUser.email)
     if (email !== invitation.email_normalized) return res.status(403).json({ error: 'Sign in with the email address that received this invitation' })
 
     const { data: workspace, error: workspaceError } = await supabase.from('customers').select('id,auth_user_id').eq('id', invitation.customer_id).maybeSingle()
     if (workspaceError || !workspace) return res.status(404).json({ error: 'Invitation workspace is unavailable' })
+
+    // Browser auth restoration can legitimately replay the same completed link.
+    // Treat only the same verified recipient's accepted invitation as idempotent.
+    if (invitation.status === 'accepted' && invitation.accepted_by_user_id === req.authUser.id) {
+      const acceptedMembership = await memberForWorkspace(invitation.customer_id, req.authUser.id)
+      if (acceptedMembership) {
+        return res.json({ workspace_id: invitation.customer_id, membership: { id: acceptedMembership.id, role: acceptedMembership.role }, idempotent: true })
+      }
+    }
+    if (invitation.status !== 'pending') return res.status(400).json({ error: 'Invitation is invalid, revoked, or already completed' })
+    if (isExpired(invitation.expires_at)) {
+      await supabase.from('workspace_invitations').update({ status: 'expired', updated_at: new Date().toISOString() }).eq('id', invitation.id).eq('status', 'pending')
+      return res.status(410).json({ error: 'This invitation has expired' })
+    }
 
     const existing = await memberForWorkspace(invitation.customer_id, req.authUser.id)
     const now = new Date().toISOString()
