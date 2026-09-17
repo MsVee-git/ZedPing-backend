@@ -25,10 +25,11 @@ function validId(value) {
 function invalidCompletionBody(body) {
   if (!body || typeof body !== 'object') return 'Invalid Embedded Signup result'
   const keys = Object.keys(body)
-  if (keys.some((key) => !['session_id', 'state', 'code', 'phone_number_id'].includes(key))) return 'Invalid Embedded Signup result'
+  if (keys.some((key) => !['session_id', 'state', 'code', 'phone_number_id', 'finish_waba_id'].includes(key))) return 'Invalid Embedded Signup result'
   if (!validId(body.session_id) || typeof body.state !== 'string' || body.state.length < 32 || body.state.length > 200) return 'Invalid Embedded Signup result'
   if (typeof body.code !== 'string' || body.code.length < 5 || body.code.length > 4096) return 'Invalid Embedded Signup result'
   if (!PHONE_NUMBER_ID_PATTERN.test(String(body.phone_number_id || ''))) return 'Invalid Embedded Signup result'
+  if (body.finish_waba_id != null && !PHONE_NUMBER_ID_PATTERN.test(String(body.finish_waba_id))) return 'Invalid Embedded Signup result'
   return null
 }
 
@@ -93,7 +94,7 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
   if (!req.workspace.emailVerified) return res.status(403).json({ error: 'Verify your email before connecting WhatsApp' })
 
   try {
-    const { session_id: sessionId, state, code, phone_number_id: phoneNumberId } = req.body
+    const { session_id: sessionId, state, code, phone_number_id: phoneNumberId, finish_waba_id: finishWabaId } = req.body
     const { data: session } = await supabase
       .from('whatsapp_connection_sessions')
       .select('id, customer_id, created_by, state_hash, expires_at, completed_at, whatsapp_number_id')
@@ -112,7 +113,7 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
 
     const meta = createMetaEmbeddedSignupClient()
     const temporaryToken = await meta.exchangeCode(code)
-    const validated = await meta.validatePhoneOwnership({ accessToken: temporaryToken, phoneNumberId })
+    const validated = await meta.validatePhoneOwnership({ accessToken: temporaryToken, phoneNumberId, finishWabaId: finishWabaId || null })
     const conflict = await findConflict(req.workspace.customerId, validated.phoneNumberId, validated.wabaId, validated.displayPhoneNumber)
     if (conflict.kind === 'foreign') {
       emitPersistenceReady(false, new MetaSignupError('This WhatsApp number is already connected to another workspace'))
