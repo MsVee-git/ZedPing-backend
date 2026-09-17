@@ -84,7 +84,7 @@ async function sendInvitationEmail({ email, role, token }) {
   const baseUrl = process.env.APP_BASE_URL
   if (!apiKey || !from || !baseUrl) throw new Error('Invitation email is not configured')
 
-  const link = `${baseUrl.replace(/\\/$/, '')}/#invite=${encodeURIComponent(token)}`
+  const link = `${baseUrl.replace(/\/$/, '')}/#invite=${encodeURIComponent(token)}`
   const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
