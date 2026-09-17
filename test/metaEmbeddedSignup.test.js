@@ -230,3 +230,105 @@ test('ownership lookup redacts identifier-like Meta errors and records only aggr
     assert.equal(output.includes(sensitiveValue), false)
   }
 })
+
+
+function transactionDiagnosticClient({ finishWabaId, phoneLists }) {
+  const diagnostics = []
+  const client = createMetaEmbeddedSignupClient({
+    env,
+    diagnostic: (record) => diagnostics.push(record),
+    http: {
+      async get(url) {
+        if (url.includes('debug_token')) {
+          return {
+            data: {
+              data: {
+                granular_scopes: [{
+                  scope: 'whatsapp_business_management',
+                  target_ids: ['993311773355', '884422119977']
+                }]
+              }
+            }
+          }
+        }
+        const wabaId = url.match(/v18\\.0\\/([0-9]+)\\/phone_numbers/)[1]
+        return { data: { data: phoneLists[wabaId] || [] } }
+      }
+    }
+  })
+  return { client, diagnostics, finishWabaId }
+}
+
+async function ownershipDiagnostic({ finishWabaId, phoneLists }) {
+  const { client, diagnostics } = transactionDiagnosticClient({ finishWabaId, phoneLists })
+  try {
+    await client.validatePhoneOwnership({
+      accessToken: 'temporary-access-token-should-never-appear',
+      phoneNumberId: '555500001111',
+      finishWabaId
+    })
+  } catch {}
+  return diagnostics.find((record) => record.stage === 'phone_ownership_lookup')
+}
+
+test('records an absent FINISH WABA claim without identifiers', async () => {
+  const record = await ownershipDiagnostic({
+    phoneLists: {
+      993311773355: [{ id: '555500001111', display_phone_number: '+260700111222' }],
+      884422119977: [{ id: '555500001111', display_phone_number: '+260700111222' }]
+    }
+  })
+  assert.equal(record.finish_waba_present, false)
+  assert.equal(record.finish_waba_is_authorized_candidate, false)
+  assert.equal(record.finish_waba_lists_selected_phone, false)
+  assert.equal(record.selected_phone_authorized_waba_match_count, 2)
+  assert.equal(record.finish_waba_disambiguates_multiple_matches, false)
+})
+
+test('records an unauthorized FINISH WABA claim without trusting it', async () => {
+  const record = await ownershipDiagnostic({
+    finishWabaId: '667788990011',
+    phoneLists: {
+      993311773355: [{ id: '555500001111', display_phone_number: '+260700111222' }],
+      884422119977: [{ id: '555500001111', display_phone_number: '+260700111222' }]
+    }
+  })
+  assert.equal(record.finish_waba_present, true)
+  assert.equal(record.finish_waba_is_authorized_candidate, false)
+  assert.equal(record.finish_waba_lists_selected_phone, false)
+  assert.equal(record.finish_waba_disambiguates_multiple_matches, false)
+})
+
+test('records an authorized FINISH WABA that does not list the selected phone', async () => {
+  const record = await ownershipDiagnostic({
+    finishWabaId: '993311773355',
+    phoneLists: {
+      993311773355: [{ id: '111122223333', display_phone_number: '+260700333444' }],
+      884422119977: [{ id: '555500001111', display_phone_number: '+260700111222' }]
+    }
+  })
+  assert.equal(record.finish_waba_present, true)
+  assert.equal(record.finish_waba_is_authorized_candidate, true)
+  assert.equal(record.finish_waba_lists_selected_phone, false)
+  assert.equal(record.selected_phone_authorized_waba_match_count, 1)
+  assert.equal(record.finish_waba_disambiguates_multiple_matches, false)
+})
+
+test('records a FINISH WABA that selects one of multiple authorized phone matches without bypassing validation', async () => {
+  const record = await ownershipDiagnostic({
+    finishWabaId: '993311773355',
+    phoneLists: {
+      993311773355: [{ id: '555500001111', display_phone_number: '+260700111222' }],
+      884422119977: [{ id: '555500001111', display_phone_number: '+260700111222' }]
+    }
+  })
+  assert.equal(record.finish_waba_present, true)
+  assert.equal(record.finish_waba_is_authorized_candidate, true)
+  assert.equal(record.finish_waba_lists_selected_phone, true)
+  assert.equal(record.selected_phone_authorized_waba_match_count, 2)
+  assert.equal(record.finish_waba_disambiguates_multiple_matches, true)
+  const output = JSON.stringify(record)
+  for (const sensitiveValue of ['993311773355', '884422119977', '555500001111', '+260700111222', 'temporary-access-token-should-never-appear']) {
+    assert.equal(output.includes(sensitiveValue), false)
+  }
+})
