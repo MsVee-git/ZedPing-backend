@@ -252,6 +252,33 @@ router.delete('/members/:userId', requireAdmin, async (req, res) => {
   }
 })
 
+async function previewInvitation(req, res) {
+  try {
+    const token = cleanToken(req.body?.token)
+    const tokenHash = hashInvitationToken(token)
+    const { data: invitation, error } = await supabase.from('workspace_invitations')
+      .select('id,customer_id,email_normalized,intended_role,status,expires_at,customers(business_name)')
+      .eq('token_hash', tokenHash)
+      .maybeSingle()
+    if (error) throw error
+    if (!invitation || invitation.status !== 'pending') return res.status(400).json({ error: 'This invitation is no longer available' })
+    if (isExpired(invitation.expires_at)) {
+      await supabase.from('workspace_invitations')
+        .update({ status: 'expired', updated_at: new Date().toISOString() })
+        .eq('id', invitation.id)
+        .eq('status', 'pending')
+      return res.status(410).json({ error: 'This invitation has expired' })
+    }
+    return res.json({
+      email: invitation.email_normalized,
+      role: invitation.intended_role,
+      business_name: invitation.customers?.business_name || 'this ZedPing workspace'
+    })
+  } catch {
+    return res.status(400).json({ error: 'This invitation is no longer available' })
+  }
+}
+
 async function acceptInvitation(req, res) {
   try {
     if (!req.authUser.email_confirmed_at) return res.status(403).json({ error: 'Verify your email before accepting this invitation' })
@@ -312,4 +339,4 @@ async function acceptInvitation(req, res) {
   }
 }
 
-module.exports = { router, acceptInvitation }
+module.exports = { router, acceptInvitation, previewInvitation }
