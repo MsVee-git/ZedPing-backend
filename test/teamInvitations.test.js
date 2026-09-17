@@ -46,7 +46,7 @@ test('safe invitation responses never expose an acceptance credential', () => {
     resend_count: 1,
     token_hash: 'must-not-be-exposed'
   })
-  assert.deepEqual(Object.keys(response).sort(), ['created_at', 'email_normalized', 'expires_at', 'id', 'intended_role', 'last_sent_at', 'resend_count', 'status'])
+  assert.deepEqual(Object.keys(response).sort(), ['created_at', 'email', 'expires_at', 'id', 'last_sent_at', 'resend_count', 'role', 'status'])
   assert.equal(response.token_hash, undefined)
 })
 
