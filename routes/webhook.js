@@ -6,6 +6,8 @@ const { sendTextMessage } = require('../lib/whatsapp')
 const { getAIResponse } = require('../lib/openai')
 const { shouldSuppressAutomation, stateForInbound } = require('../lib/conversationState')
 const { recordConversationEvent } = require('../lib/conversationEvents')
+const { selectAutomation } = require('../lib/automationRouting')
+const { inboundEventPayload, isDuplicateInboundEventError } = require('../lib/inboundWebhookEvents')
 
 router.get('/', (req, res) => {
   const received = Buffer.from(String(req.query['hub.verify_token'] || ''))
@@ -120,7 +122,19 @@ async function persistInbound(ctx, contact, conversation) {
   return conversation
 }
 
+async function claimInboundEvent(ctx) {
+  const event = inboundEventPayload(ctx)
+  if (!event) return true
+  const { error } = await supabase.from('inbound_webhook_events').insert(event)
+  if (!error) return true
+  if (isDuplicateInboundEventError(error)) return false
+  throw error
+}
+
 async function processMessage(ctx) {
+  // Claim the Meta message identity before any contact, conversation, message,
+  // or automation side effect. A retry therefore cannot trigger twice.
+  if (!(await claimInboundEvent(ctx))) return
   const contact = await findOrCreateContact(ctx)
   const existing = await findConversation(ctx, contact)
   const conversation = await persistInbound(ctx, contact, existing)
@@ -158,19 +172,36 @@ async function outgoing(ctx, body) {
 }
 
 async function checkAutomations(ctx) {
-  const { data: list } = await supabase.from('automations').select('*')
-    .eq('customer_id', ctx.customerId).eq('trigger_type', 'keyword').eq('is_active', true)
-  const text = ctx.body.trim().toUpperCase()
-  const match = (list || []).find((automation) => (automation.trigger_value || '').toUpperCase() === text)
-    || (list || []).find((automation) => (automation.trigger_value || '').toUpperCase() === 'DEFAULT')
+  const { data: list, error } = await supabase.from('automations').select('*')
+    .eq('customer_id', ctx.customerId)
+    .eq('trigger_type', 'keyword')
+    .eq('is_active', true)
+    .order('priority', { ascending: true })
+    .order('created_at', { ascending: true })
+    .order('id', { ascending: true })
+  if (error) throw error
+
+  const { automation: match } = selectAutomation(list, ctx.body)
   if (!match) return
   if (match.chatbot_flow_id) return startFlow(ctx, match.chatbot_flow_id)
   if ((match.trigger_value || '').toUpperCase() === 'CHAT') {
-    const { data: agent } = await supabase.from('ai_agents').select('*')
-      .eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).eq('is_active', true).maybeSingle()
-    if (agent) await supabase.from('ai_agent_sessions').insert({
-      customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, agent_id: agent.id, contact_phone: ctx.from, status: 'active'
-    })
+    const { data: agents, error: agentError } = await supabase.from('ai_agents').select('*')
+      .eq('customer_id', ctx.customerId)
+      .eq('whatsapp_number_id', ctx.number.id)
+      .eq('is_active', true)
+      .limit(2)
+    if (agentError) throw agentError
+    // The partial unique index makes this one agent in normal operation.
+    // If historic or manually-created data ever violates that expectation,
+    // decline to choose an arbitrary agent.
+    if (agents?.length !== 1) return
+    await supabase.from('ai_agent_sessions').upsert({
+      customer_id: ctx.customerId,
+      whatsapp_number_id: ctx.number.id,
+      agent_id: agents[0].id,
+      contact_phone: ctx.from,
+      status: 'active'
+    }, { onConflict: 'customer_id,whatsapp_number_id,contact_phone' })
     return
   }
   await outgoing(ctx, match.message_template)
@@ -183,7 +214,10 @@ async function startFlow(ctx, flowId) {
   const { data: step } = await supabase.from('chatbot_steps').select('*').eq('flow_id', flow.id)
     .order('step_order').limit(1).maybeSingle()
   if (!step) return
-  await supabase.from('chatbot_sessions').delete().eq('customer_id', ctx.customerId).eq('contact_phone', ctx.from)
+  await supabase.from('chatbot_sessions').delete()
+    .eq('customer_id', ctx.customerId)
+    .eq('whatsapp_number_id', ctx.number.id)
+    .eq('contact_phone', ctx.from)
   await supabase.from('chatbot_sessions').insert({
     customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, contact_phone: ctx.from,
     flow_id: flow.id, current_step_id: step.id, status: 'active'
@@ -215,11 +249,12 @@ async function checkAISession(ctx) {
     .eq('contact_phone', ctx.from).eq('status', 'active').maybeSingle()
   if (!session) return false
   const agent = session.ai_agents
-  if (!agent || agent.customer_id !== ctx.customerId) return false
+  if (!agent || agent.customer_id !== ctx.customerId || agent.whatsapp_number_id !== ctx.number.id) return false
   const history = [...(session.messages || []), { role: 'user', content: ctx.body }]
   const reply = await getAIResponse(agent.system_prompt, history, agent)
   history.push({ role: 'assistant', content: reply })
-  await supabase.from('ai_agent_sessions').update({ messages: history, updated_at: new Date().toISOString() }).eq('id', session.id)
+  await supabase.from('ai_agent_sessions').update({ messages: history, updated_at: new Date().toISOString() })
+    .eq('id', session.id).eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id)
   await outgoing(ctx, reply)
   return true
 }
