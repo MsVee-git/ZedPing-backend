@@ -195,13 +195,17 @@ async function checkAutomations(ctx) {
     // If historic or manually-created data ever violates that expectation,
     // decline to choose an arbitrary agent.
     if (agents?.length !== 1) return
-    await supabase.from('ai_agent_sessions').upsert({
+    const { error: sessionError } = await supabase.from('ai_agent_sessions').insert({
       customer_id: ctx.customerId,
       whatsapp_number_id: ctx.number.id,
       agent_id: agents[0].id,
       contact_phone: ctx.from,
       status: 'active'
-    }, { onConflict: 'customer_id,whatsapp_number_id,contact_phone' })
+    })
+    // A concurrent copy of the same inbound event cannot select a second
+    // active session. Its message claim will normally stop first; this is a
+    // safe second line of defence.
+    if (sessionError && !isDuplicateInboundEventError(sessionError)) throw sessionError
     return
   }
   await outgoing(ctx, match.message_template)
