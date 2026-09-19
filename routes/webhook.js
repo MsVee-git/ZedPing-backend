@@ -8,6 +8,7 @@ const { shouldSuppressAutomation, stateForInbound } = require('../lib/conversati
 const { recordConversationEvent } = require('../lib/conversationEvents')
 const { selectAutomation } = require('../lib/automationRouting')
 const { inboundEventPayload, isDuplicateInboundEventError } = require('../lib/inboundWebhookEvents')
+const { selectSoleActiveAgent } = require('../lib/aiAgentSelection')
 
 router.get('/', (req, res) => {
   const received = Buffer.from(String(req.query['hub.verify_token'] || ''))
@@ -194,11 +195,12 @@ async function checkAutomations(ctx) {
     // The partial unique index makes this one agent in normal operation.
     // If historic or manually-created data ever violates that expectation,
     // decline to choose an arbitrary agent.
-    if (agents?.length !== 1) return
+    const agent = selectSoleActiveAgent(agents)
+    if (!agent) return
     const { error: sessionError } = await supabase.from('ai_agent_sessions').insert({
       customer_id: ctx.customerId,
       whatsapp_number_id: ctx.number.id,
-      agent_id: agents[0].id,
+      agent_id: agent.id,
       contact_phone: ctx.from,
       status: 'active'
     })
