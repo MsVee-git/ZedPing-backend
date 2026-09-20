@@ -59,6 +59,32 @@ async function assertFlow(customerId, flowId) {
 async function readAutomation(input = {}, customerId) {
   const allowed = ['automation_type', 'trigger_type', 'trigger_value', 'trigger_config', 'condition_config', 'action_config', 'message_template', 'chatbot_flow_id', 'content_library_item_id', 'priority']
   if (Object.keys(input).some((key) => !allowed.includes(key))) throw new Error('Invalid automation request')
+  // Legacy DEFAULT rows predate the typed automation model. Preserve their
+  // fallback semantics on edit instead of converting them into a literal
+  // keyword named DEFAULT.
+  const legacyDefault = !input.automation_type && input.trigger_type === 'keyword'
+    && String(input.trigger_value || '').trim().toUpperCase() === 'DEFAULT'
+  if (legacyDefault) {
+    const priority = input.priority === undefined ? 100 : Number(input.priority)
+    if (!Number.isInteger(priority) || priority < 0 || priority > 100000) throw new Error('Automation priority is invalid')
+    const message_template = cleanText(input.message_template, 4096, 'Automation message', true)
+    const chatbot_flow_id = input.chatbot_flow_id || null
+    const content_library_item_id = input.content_library_item_id || null
+    if (content_library_item_id) throw new Error('Legacy default replies cannot use Content Library')
+    if (chatbot_flow_id) await assertFlow(customerId, chatbot_flow_id)
+    return {
+      automation_type: null,
+      trigger_type: 'keyword',
+      trigger_value: 'DEFAULT',
+      trigger_config: {},
+      condition_config: {},
+      action_config: { kind: 'send_text' },
+      message_template,
+      chatbot_flow_id,
+      content_library_item_id: null,
+      priority
+    }
+  }
   const legacyTrigger = input.trigger_type === 'keyword' ? 'keyword' : ''
   const automation_type = cleanText(input.automation_type || legacyTrigger, 40, 'Automation type', true).toLowerCase()
   if (!TYPES.has(automation_type)) throw new Error('Automation type is invalid')
