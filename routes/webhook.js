@@ -6,7 +6,8 @@ const { sendTextMessage } = require('../lib/whatsapp')
 const { getAIResponse } = require('../lib/openai')
 const { shouldSuppressAutomation, stateForInbound } = require('../lib/conversationState')
 const { recordConversationEvent } = require('../lib/conversationEvents')
-const { selectAutomation } = require('../lib/automationRouting')
+const { selectExplicitAutomation, selectAwayAutomation, selectWelcomeAutomation, selectDefaultAutomation, isOutsideBusinessHours } = require('../lib/automationRuntime')
+const { recordAutomationEvent, claimWelcome, completeWelcome, releaseWelcome } = require('../lib/automationExecution')
 const { inboundEventPayload, isDuplicateInboundEventError } = require('../lib/inboundWebhookEvents')
 const { selectSoleActiveAgent } = require('../lib/aiAgentSelection')
 
@@ -153,9 +154,9 @@ async function processMessage(ctx) {
 }
 
 async function outgoing(ctx, body) {
-  await sendTextMessage(ctx.number.phone_number_id, ctx.from, body, ctx.number.access_token)
+  const result = await sendTextMessage(ctx.number.phone_number_id, ctx.from, body, ctx.number.access_token)
   const now = new Date().toISOString()
-  const { error } = await supabase.from('messages').insert({
+  const { data: message, error } = await supabase.from('messages').insert({
     customer_id: ctx.customerId,
     whatsapp_number_id: ctx.number.id,
     contact_id: ctx.contact?.id || null,
@@ -163,54 +164,123 @@ async function outgoing(ctx, body) {
     direction: 'outbound',
     to_number: ctx.from,
     message_body: body,
-    status: 'sent'
-  })
+    status: 'sent',
+    meta_message_id: result?.messages?.[0]?.id || null
+  }).select().single()
   if (error) throw error
   if (ctx.conversation?.id) {
     await supabase.from('conversations').update({ last_message_at: now, last_outbound_at: now, updated_at: now })
       .eq('id', ctx.conversation.id).eq('customer_id', ctx.customerId)
   }
+  return message
+}
+
+async function workspaceAutomationSettings(customerId) {
+  const { data, error } = await supabase.from('workspace_automation_settings')
+    .select('timezone,business_hours').eq('customer_id', customerId).maybeSingle()
+  if (error) throw error
+  return data || null
+}
+
+async function responseBody(ctx, automation) {
+  const action = automation.action_config || {}
+  if (action.kind !== 'content_library') return automation.message_template
+  const { data: item, error } = await supabase.from('content_library_items')
+    .select('content_type,text_content,link_url').eq('id', automation.content_library_item_id)
+    .eq('customer_id', ctx.customerId).is('archived_at', null).maybeSingle()
+  if (error) throw error
+  if (!item || !['TEXT', 'LINK'].includes(item.content_type)) throw new Error('Automation content is unavailable')
+  return item.content_type === 'TEXT' ? item.text_content : item.link_url
+}
+
+async function handoffFromAutomation(ctx, automation) {
+  const now = new Date().toISOString()
+  const reason = String(automation.action_config?.reason || 'Requested by automation').trim().slice(0, 500) || 'Requested by automation'
+  const { data, error } = await supabase.from('conversations').update({
+    status: 'needs_attention',
+    control_mode: 'needs_attention',
+    assigned_user_id: null,
+    handoff_reason: reason,
+    handoff_at: now,
+    updated_at: now
+  }).eq('id', ctx.conversation.id).eq('customer_id', ctx.customerId).select().maybeSingle()
+  if (error || !data) throw error || new Error('Conversation is unavailable for handoff')
+  await recordConversationEvent({ customerId: ctx.customerId, conversationId: data.id, eventType: 'handoff_requested', metadata: { source: 'automation' } })
+}
+
+async function startLegacyAI(ctx) {
+  const { data: agents, error: agentError } = await supabase.from('ai_agents').select('*')
+    .eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).eq('is_active', true).limit(2)
+  if (agentError) throw agentError
+  const agent = selectSoleActiveAgent(agents)
+  if (!agent) return false
+  const { error: sessionError } = await supabase.from('ai_agent_sessions').insert({
+    customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, agent_id: agent.id, contact_phone: ctx.from, status: 'active'
+  })
+  if (sessionError && !isDuplicateInboundEventError(sessionError)) throw sessionError
+  return true
+}
+
+async function executeAutomation(ctx, automation) {
+  const action = automation.action_config || {}
+  const kind = action.kind || (automation.chatbot_flow_id ? 'start_chatbot_flow' : 'send_text')
+  await recordAutomationEvent(ctx, 'triggered', 'success', { rule_kind: automation.automation_type || 'legacy_keyword', action_kind: kind }, automation.id)
+  if (kind === 'human_handoff') {
+    await handoffFromAutomation(ctx, automation)
+    await recordAutomationEvent(ctx, 'handoff_initiated', 'success', { action_kind: kind }, automation.id)
+    return
+  }
+  if (kind === 'start_chatbot_flow' || automation.chatbot_flow_id) {
+    await startFlow(ctx, automation.chatbot_flow_id)
+    await recordAutomationEvent(ctx, 'response_sent', 'success', { action_kind: 'start_chatbot_flow' }, automation.id)
+    return
+  }
+  if ((automation.trigger_value || '').trim().toUpperCase() === 'CHAT' && !automation.automation_type) {
+    if (await startLegacyAI(ctx)) return
+  }
+  const body = await responseBody(ctx, automation)
+  const message = await outgoing(ctx, body)
+  await recordAutomationEvent(ctx, 'response_sent', 'success', { action_kind: kind, content_type: action.kind === 'content_library' ? 'content_library' : 'written_text' }, automation.id)
+  return message
+}
+
+async function runWelcome(ctx, automation) {
+  const claimed = await claimWelcome(ctx, automation.id)
+  if (!claimed) {
+    await recordAutomationEvent(ctx, 'skipped', 'skipped', { reason: 'welcome_already_delivered' }, automation.id)
+    return false
+  }
+  try {
+    const message = await executeAutomation(ctx, automation)
+    await completeWelcome(ctx, message?.id || null)
+    return true
+  } catch (error) {
+    await releaseWelcome(ctx)
+    await recordAutomationEvent(ctx, 'error', 'error', { reason: 'welcome_send_failed' }, automation.id).catch(() => {})
+    throw error
+  }
 }
 
 async function checkAutomations(ctx) {
   const { data: list, error } = await supabase.from('automations').select('*')
-    .eq('customer_id', ctx.customerId)
-    .eq('trigger_type', 'keyword')
-    .eq('is_active', true)
-    .order('priority', { ascending: true })
-    .order('created_at', { ascending: true })
-    .order('id', { ascending: true })
+    .eq('customer_id', ctx.customerId).eq('is_active', true).is('archived_at', null)
+    .order('priority', { ascending: true }).order('created_at', { ascending: true }).order('id', { ascending: true })
   if (error) throw error
 
-  const { automation: match } = selectAutomation(list, ctx.body)
-  if (!match) return
-  if (match.chatbot_flow_id) return startFlow(ctx, match.chatbot_flow_id)
-  if ((match.trigger_value || '').toUpperCase() === 'CHAT') {
-    const { data: agents, error: agentError } = await supabase.from('ai_agents').select('*')
-      .eq('customer_id', ctx.customerId)
-      .eq('whatsapp_number_id', ctx.number.id)
-      .eq('is_active', true)
-      .limit(2)
-    if (agentError) throw agentError
-    // The partial unique index makes this one agent in normal operation.
-    // If historic or manually-created data ever violates that expectation,
-    // decline to choose an arbitrary agent.
-    const agent = selectSoleActiveAgent(agents)
-    if (!agent) return
-    const { error: sessionError } = await supabase.from('ai_agent_sessions').insert({
-      customer_id: ctx.customerId,
-      whatsapp_number_id: ctx.number.id,
-      agent_id: agent.id,
-      contact_phone: ctx.from,
-      status: 'active'
-    })
-    // A concurrent copy of the same inbound event cannot select a second
-    // active session. Its message claim will normally stop first; this is a
-    // safe second line of defence.
-    if (sessionError && !isDuplicateInboundEventError(sessionError)) throw sessionError
-    return
+  const explicit = selectExplicitAutomation(list, ctx.body)
+  if (explicit) return executeAutomation(ctx, explicit)
+
+  const settings = await workspaceAutomationSettings(ctx.customerId)
+  if (settings && isOutsideBusinessHours(settings)) {
+    const away = selectAwayAutomation(list)
+    if (away) return executeAutomation(ctx, away)
   }
-  await outgoing(ctx, match.message_template)
+
+  const welcome = selectWelcomeAutomation(list)
+  if (welcome && await runWelcome(ctx, welcome)) return
+
+  const fallback = selectDefaultAutomation(list)
+  if (fallback) return executeAutomation(ctx, fallback)
 }
 
 async function startFlow(ctx, flowId) {
