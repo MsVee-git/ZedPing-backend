@@ -57,9 +57,10 @@ async function assertFlow(customerId, flowId) {
 }
 
 async function readAutomation(input = {}, customerId) {
-  const allowed = ['automation_type', 'trigger_value', 'trigger_config', 'condition_config', 'action_config', 'message_template', 'chatbot_flow_id', 'content_library_item_id', 'priority']
+  const allowed = ['automation_type', 'trigger_type', 'trigger_value', 'trigger_config', 'condition_config', 'action_config', 'message_template', 'chatbot_flow_id', 'content_library_item_id', 'priority']
   if (Object.keys(input).some((key) => !allowed.includes(key))) throw new Error('Invalid automation request')
-  const automation_type = cleanText(input.automation_type, 40, 'Automation type', true).toLowerCase()
+  const legacyTrigger = input.trigger_type === 'keyword' ? 'keyword' : ''
+  const automation_type = cleanText(input.automation_type || legacyTrigger, 40, 'Automation type', true).toLowerCase()
   if (!TYPES.has(automation_type)) throw new Error('Automation type is invalid')
   const priority = input.priority === undefined ? 100 : Number(input.priority)
   if (!Number.isInteger(priority) || priority < 0 || priority > 100000) throw new Error('Automation priority is invalid')
