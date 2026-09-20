@@ -146,7 +146,10 @@ async function processMessage(ctx) {
   // This server-side guard is intentionally before AI, flow and keyword execution.
   // Needs-attention and human conversations keep receiving/persisting inbound
   // messages but cannot produce an automated response.
-  if (shouldSuppressAutomation(conversation)) return
+  if (shouldSuppressAutomation(conversation)) {
+    await recordAutomationEvent(ctx, 'skipped', 'skipped', { reason: 'team_inbox_control' }).catch(() => {})
+    return
+  }
 
   if (await checkAISession(ctx)) return
   if (await checkFlowSession(ctx)) return
