@@ -10,6 +10,7 @@ const { selectExplicitAutomation, selectAwayAutomation, selectWelcomeAutomation,
 const { recordAutomationEvent, claimWelcome, completeWelcome, releaseWelcome } = require('../lib/automationExecution')
 const { inboundEventPayload, isDuplicateInboundEventError } = require('../lib/inboundWebhookEvents')
 const { selectSoleActiveAgent } = require('../lib/aiAgentSelection')
+const { startFlow, continueFlow } = require('../lib/chatbotExecution')
 
 router.get('/', (req, res) => {
   const received = Buffer.from(String(req.query['hub.verify_token'] || ''))
@@ -152,7 +153,7 @@ async function processMessage(ctx) {
   }
 
   if (await checkAISession(ctx)) return
-  if (await checkFlowSession(ctx)) return
+  if (await continueFlow(ctx, outgoing)) return
   await checkAutomations(ctx)
 }
 
@@ -234,7 +235,7 @@ async function executeAutomation(ctx, automation) {
     return
   }
   if (kind === 'start_chatbot_flow' || automation.chatbot_flow_id) {
-    await startFlow(ctx, automation.chatbot_flow_id)
+    await startFlow(ctx, automation.chatbot_flow_id, outgoing)
     await recordAutomationEvent(ctx, 'response_sent', 'success', { action_kind: 'start_chatbot_flow' }, automation.id)
     return
   }
@@ -286,41 +287,6 @@ async function checkAutomations(ctx) {
   if (fallback) return executeAutomation(ctx, fallback)
 }
 
-async function startFlow(ctx, flowId) {
-  const { data: flow } = await supabase.from('chatbot_flows').select('id')
-    .eq('id', flowId).eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).maybeSingle()
-  if (!flow) return
-  const { data: step } = await supabase.from('chatbot_steps').select('*').eq('flow_id', flow.id)
-    .order('step_order').limit(1).maybeSingle()
-  if (!step) return
-  await supabase.from('chatbot_sessions').delete()
-    .eq('customer_id', ctx.customerId)
-    .eq('whatsapp_number_id', ctx.number.id)
-    .eq('contact_phone', ctx.from)
-  await supabase.from('chatbot_sessions').insert({
-    customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, contact_phone: ctx.from,
-    flow_id: flow.id, current_step_id: step.id, status: 'active'
-  })
-  await outgoing(ctx, step.message_body)
-}
-
-async function checkFlowSession(ctx) {
-  const { data: session } = await supabase.from('chatbot_sessions').select('*')
-    .eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id)
-    .eq('contact_phone', ctx.from).eq('status', 'active').maybeSingle()
-  if (!session) return false
-  const { data: route } = await supabase.from('chatbot_step_routes').select('*')
-    .eq('step_id', session.current_step_id).eq('match_value', ctx.body.trim().toUpperCase()).maybeSingle()
-  if (!route) {
-    await supabase.from('chatbot_sessions').update({ status: 'ended' }).eq('id', session.id)
-    return true
-  }
-  const { data: next } = await supabase.from('chatbot_steps').select('*').eq('id', route.next_step_id).maybeSingle()
-  if (!next) return true
-  await supabase.from('chatbot_sessions').update({ current_step_id: next.id }).eq('id', session.id)
-  await outgoing(ctx, next.message_body)
-  return true
-}
 
 async function checkAISession(ctx) {
   const { data: session } = await supabase.from('ai_agent_sessions').select('*,ai_agents(*)')
