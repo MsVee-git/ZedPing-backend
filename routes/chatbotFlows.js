@@ -41,12 +41,13 @@ async function checkedDefinition(customerId, definition) {
 
 router.get('/setup', async (req, res) => {
   try {
-    const [{ data: numbers, error: numberError }, { data: discovery, error: discoveryError }] = await Promise.all([
+    const [{ data: numbers, error: numberError }, { data: discovery, error: discoveryError }, { data: customer, error: customerError }] = await Promise.all([
       supabase.from('whatsapp_numbers').select('id,phone_number,display_name,status').eq('customer_id', req.workspace.customerId).eq('status', 'connected'),
-      supabase.from('workspace_discovery').select('industry,goals').eq('customer_id', req.workspace.customerId).maybeSingle()
+      supabase.from('workspace_discovery').select('goals').eq('customer_id', req.workspace.customerId).maybeSingle(),
+      supabase.from('customers').select('industry').eq('id', req.workspace.customerId).maybeSingle()
     ])
-    if (numberError || discoveryError) throw numberError || discoveryError
-    res.json({ numbers: numbers || [], discovery: discovery || null })
+    if (numberError || discoveryError || customerError) throw numberError || discoveryError || customerError
+    res.json({ numbers: numbers || [], discovery: { ...(discovery || {}), industry: customer?.industry || null } })
   } catch (_) { res.status(500).json({ error: 'Unable to load Chatbot Flow setup' }) }
 })
 
