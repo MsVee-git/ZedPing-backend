@@ -222,6 +222,16 @@ async function liveReadiness(customerId, agent) {
   return knowledge
 }
 
+router.get('/:id/test-contacts', requireAdmin, async (req,res) => {
+  try {
+    await agentForWorkspace(req.workspace.customerId, req.params.id)
+    const { data, error } = await supabase.from('ai_agent_test_contacts').select('id,phone_e164,created_at')
+      .eq('customer_id',req.workspace.customerId).eq('agent_id',req.params.id).order('created_at')
+    if (error) throw error
+    res.json({test_contacts:data || []})
+  } catch(error) { res.status(400).json({error:error.message || 'Unable to load approved test contacts'}) }
+})
+
 router.post('/:id/test-contacts', requireAdmin, async (req,res) => {
   try {
     const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
@@ -233,6 +243,18 @@ router.post('/:id/test-contacts', requireAdmin, async (req,res) => {
     if (error) throw error
     res.status(201).json({ test_contact:{id:data.id, phone_e164:data.phone_e164} })
   } catch(error) { res.status(error?.code === '23505' ? 409 : 400).json({error:error.message || 'Unable to add test contact'}) }
+})
+
+router.delete('/:id/test-contacts/:contactId', requireAdmin, async (req,res) => {
+  try {
+    const agent=await agentForWorkspace(req.workspace.customerId,req.params.id)
+    if (agent.lifecycle_status === 'active') throw new Error('Pause the active AI Agent before changing its test contacts')
+    const { data, error }=await supabase.from('ai_agent_test_contacts').delete()
+      .eq('id',req.params.contactId).eq('customer_id',req.workspace.customerId).eq('agent_id',agent.id).select('id').maybeSingle()
+    if (error) throw error
+    if (!data) throw new Error('Approved test contact not found')
+    res.json({removed:true})
+  } catch(error) { res.status(400).json({error:error.message || 'Unable to remove approved test contact'}) }
 })
 
 router.get('/:id/readiness', requireAdmin, async (req,res) => {
