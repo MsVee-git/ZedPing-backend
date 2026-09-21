@@ -154,13 +154,13 @@ router.post('/drafts', requireAdmin, async (req,res) => {
 router.patch('/:id/draft', requireAdmin, async (req,res) => {
   try {
     const current = await agentForWorkspace(req.workspace.customerId, req.params.id)
-    if (current.lifecycle_status !== 'draft') throw new Error('Only draft AI Agents can be edited in this phase')
+    if (current.lifecycle_status !== 'draft' && current.lifecycle_status !== 'paused') throw new Error('Pause an active AI Agent before editing its configuration')
     const input = readConfig(req.body)
     const number = await workspaceNumber(req.workspace.customerId, req.body?.whatsapp_number_id || current.whatsapp_number_id)
     const knowledge = await selectedKnowledge(req.workspace.customerId, req.body?.knowledge_item_ids)
     const { data:agent,error } = await supabase.from('ai_agents').update({
       name:input.name, agent_type:input.agentType, whatsapp_number_id:number.id, zoe_template_key:input.template.key,
-      zoe_configuration:input.configuration, configuration_version:Number(current.configuration_version || 1)+1
+      zoe_configuration:input.configuration, lifecycle_status:'draft', is_active:false, configuration_version:Number(current.configuration_version || 1)+1
     }).eq('id',current.id).eq('customer_id',req.workspace.customerId).select().single()
     if (error) throw error
     await replaceKnowledge(req.workspace.customerId,agent.id,knowledge)
