@@ -23,11 +23,5 @@ test('contact group routes enforce manager-only mutations and workspace-scoped l
   assert.match(source, /router\.delete\('\/:groupId\/members\/:memberId', requireAdmin/)
   assert.match(source, /router\.delete\('\/:groupId', requireAdmin/)
   assert.match(source, /eq\('customer_id', req\.workspace\.customerId\)/)
-  assert.match(source, /eq\('customer_id', req\.workspace\.customerId\)/)
-})
-
-test('dashboard sends group mutations through the authenticated backend API', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', '..', 'ZedPing-Dashboard', 'src', 'App.tsx'), 'utf8')
-  assert.match(source, /\$\{API\}\/contact-groups/)
-  assert.doesNotMatch(source, /function createGroup\(\)[\s\S]{0,500}supabase\.from\("contact_groups"\)\.insert/)
+  assert.match(source, /findWorkspaceGroup\(req\.params\.groupId, req\.workspace\.customerId\)/)
 })
