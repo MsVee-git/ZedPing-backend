@@ -34,26 +34,6 @@ alter table public.ai_agent_sessions
   add constraint ai_agent_sessions_status_check
   check (status in ('active','handed_off','ended','expired','failed','cancelled'));
 
--- These rows were independently identified as legacy and unscoped before this
--- migration. They are preserved, never assigned, and permanently excluded from
--- every tenant runtime path.
-update public.ai_agents
-set lifecycle_status = 'archived',
-    is_active = false,
-    archived_at = coalesce(archived_at, now()),
-    archive_reason = coalesce(archive_reason, 'legacy_unscoped_pre_d25'),
-    legacy_contained_at = coalesce(legacy_contained_at, now())
-where (customer_id is null or whatsapp_number_id is null)
-  and legacy_contained_at is null;
-
-update public.ai_agent_sessions
-set status = case when status = 'active' then 'ended' else status end,
-    ended_at = coalesce(ended_at, now()),
-    completion_reason = coalesce(completion_reason, 'legacy_unscoped_pre_d25'),
-    legacy_contained_at = coalesce(legacy_contained_at, now())
-where (customer_id is null or whatsapp_number_id is null)
-  and legacy_contained_at is null;
-
 create table if not exists public.ai_execution_events (
   id uuid primary key default gen_random_uuid(),
   customer_id uuid not null references public.customers(id) on delete cascade,
@@ -195,6 +175,27 @@ begin
   return new;
 end;
 $$;
+
+-- These rows were independently identified as legacy and unscoped before this
+-- migration. They are preserved, never assigned, and permanently excluded from
+-- every tenant runtime path. This runs only after the containment-aware triggers
+-- are installed, so historic rows cannot be reactivated by the migration itself.
+update public.ai_agents
+set lifecycle_status = 'archived',
+    is_active = false,
+    archived_at = coalesce(archived_at, now()),
+    archive_reason = coalesce(archive_reason, 'legacy_unscoped_pre_d25'),
+    legacy_contained_at = coalesce(legacy_contained_at, now())
+where (customer_id is null or whatsapp_number_id is null)
+  and legacy_contained_at is null;
+
+update public.ai_agent_sessions
+set status = case when status = 'active' then 'ended' else status end,
+    ended_at = coalesce(ended_at, now()),
+    completion_reason = coalesce(completion_reason, 'legacy_unscoped_pre_d25'),
+    legacy_contained_at = coalesce(legacy_contained_at, now())
+where (customer_id is null or whatsapp_number_id is null)
+  and legacy_contained_at is null;
 
 drop trigger if exists ai_execution_events_workspace_integrity on public.ai_execution_events;
 create trigger ai_execution_events_workspace_integrity
