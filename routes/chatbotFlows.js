@@ -89,6 +89,9 @@ router.post('/from-library', requireAdmin, async (req, res) => {
     const draft = await checkedDefinition(req.workspace.customerId, template.definition)
     const { data, error } = await supabase.from('chatbot_flows').insert({
       customer_id: req.workspace.customerId, whatsapp_number_id: whatsappNumber.id, name: template.title,
+      // Legacy columns remain non-null. New D2.4 flows are still draft-only;
+      // a future published automation controls when they may start.
+      trigger_type: 'keyword', trigger_value: null, plan_required: 'business',
       draft_definition: draft, draft_updated_at: new Date().toISOString(), lifecycle_status: 'draft', is_active: false
     }).select().single()
     if (error) throw error
@@ -102,6 +105,8 @@ router.post('/', requireAdmin, async (req, res) => {
     const draft = await checkedDefinition(req.workspace.customerId, req.body?.draft_definition)
     const { data, error } = await supabase.from('chatbot_flows').insert({
       customer_id: req.workspace.customerId, whatsapp_number_id: whatsappNumber.id, name: cleanName(req.body?.name),
+      // Blank drafts use the same legacy values; they are not runtime triggers.
+      trigger_type: 'keyword', trigger_value: null, plan_required: 'business',
       draft_definition: draft, draft_updated_at: new Date().toISOString(), lifecycle_status: 'draft', is_active: false
     }).select().single()
     if (error) throw error
