@@ -4,7 +4,7 @@ const router = express.Router()
 const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
 const { createMetaTemplateClient, MetaTemplateError } = require('../lib/metaTemplates')
-const { CONTENT_BUCKET, TYPES, cleanText, safeUrl, assertFile, storagePath, itemForClient } = require('../lib/contentLibrary')
+const { CONTENT_BUCKET, TYPES, cleanText, safeUrl, assertFile, storagePath, itemForClient, editablePatch } = require('../lib/contentLibrary')
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } })
 function parseUpload(req, res, next) {
@@ -101,18 +101,14 @@ router.patch('/:id', requireAdmin, async (req, res) => {
   try {
     const item = await ownedItem(req.workspace.customerId, req.params.id)
     if (item.archived_at) return res.status(409).json({ error: 'Archived content cannot be edited' })
-    const body = req.body || {}
-    if (Object.keys(body).some((key) => !['name', 'description', 'text_content', 'link_url'].includes(key))) return res.status(400).json({ error: 'Invalid content update' })
-    const patch = { updated_at: new Date().toISOString() }
-    if (Object.hasOwn(body, 'name')) patch.name = cleanText(body.name, 160, 'Name', true)
-    if (Object.hasOwn(body, 'description')) patch.description = cleanText(body.description, 500, 'Description')
-    if (item.content_type === 'TEXT' && Object.hasOwn(body, 'text_content')) patch.text_content = cleanText(body.text_content, 20000, 'Content', true)
-    if (item.content_type === 'LINK' && Object.hasOwn(body, 'link_url')) patch.link_url = safeUrl(body.link_url)
-    if (['DOCUMENT','IMAGE','WHATSAPP_TEMPLATE_REFERENCE'].includes(item.content_type) && (Object.hasOwn(body, 'text_content') || Object.hasOwn(body, 'link_url'))) return res.status(400).json({ error: 'This content type cannot be edited that way' })
+    const patch = editablePatch(item, req.body)
     const { data, error } = await supabase.from('content_library_items').update(patch).eq('id', item.id).eq('customer_id', req.workspace.customerId).select().single()
     if (error) throw error
     res.json({ item: itemForClient(data) })
-  } catch (error) { res.status(error.status || 400).json({ error: error.message || 'Unable to update content' }) }
+  } catch (error) {
+    const safe = new Set(['Archived content cannot be edited', 'Invalid content update', 'Choose something to update', 'Name is required', 'Name is invalid', 'Name is too long', 'Description is invalid', 'Description is too long', 'Content is required', 'Content is invalid', 'Content is too long', 'Link URL is required', 'Link URL is invalid', 'Link URL is too long', 'Enter a valid http or https URL', 'Only http and https links are allowed', 'Text content cannot include a link update', 'Link content cannot include a text update', 'This content type cannot be edited that way'])
+    res.status(error.status || 400).json({ error: safe.has(error.message) ? error.message : 'Unable to update content' })
+  }
 })
 
 router.post('/:id/archive', requireAdmin, async (req, res) => {
