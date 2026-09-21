@@ -4,6 +4,7 @@ const cors = require('cors')
 const app = express()
 app.use(cors())
 app.use(express.json({
+  limit: '2mb',
   verify: (req, res, buffer) => {
     req.rawBody = buffer
   }
