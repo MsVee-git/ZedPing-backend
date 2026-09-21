@@ -5,6 +5,7 @@ const { requireAdmin } = require('../middleware/auth')
 const { BETA_MODEL, boundedHistory, estimateCostUsd } = require('../lib/aiRuntime')
 const { getAICompletion } = require('../lib/openai')
 const { normalizePhone } = require('../lib/contactImport')
+const { configuredHandoff, lacksLexicalSupport, handoffReply } = require('../lib/zoeGrounding')
 
 const MAX_KNOWLEDGE_ITEMS = 5
 const MAX_KNOWLEDGE_ITEM_CHARS = 3000
@@ -179,9 +180,13 @@ router.post('/:id/test', requireAdmin, async (req,res) => {
     const knowledge=await knowledgeForAgent(req.workspace.customerId,agent.id,true)
     const prompt=buildSystem(agent,knowledge)
     const completion=await getAICompletion(prompt,messages,null)
-    const handoff=wouldHandoff(agent.zoe_configuration,messages,knowledge.length>0)
+    const requestedReason=configuredHandoff(agent.zoe_configuration, messages[messages.length-1]?.content)
+    const unknownReason=agent.zoe_configuration?.handoff?.unknown !== false && lacksLexicalSupport(messages[messages.length-1]?.content, knowledge) ? 'no_approved_answer' : null
+    const handoffReason=requestedReason || unknownReason
+    const handoff=Boolean(handoffReason)
+    const reply=handoff ? handoffReply(handoffReason) : completion.text
     await supabase.from('ai_agent_test_events').insert({customer_id:req.workspace.customerId,agent_id:agent.id,actor_user_id:req.workspace.userId,outcome:handoff?'would_handoff':'test_replied',knowledge_item_count:knowledge.length,input_tokens:completion.inputTokens,output_tokens:completion.outputTokens,estimated_cost_usd:estimateCostUsd(completion.model,completion.inputTokens,completion.outputTokens)})
-    res.json({reply:completion.text, approved_knowledge_available:knowledge.map(item=>item.name), no_approved_knowledge:knowledge.length===0, would_handoff:handoff, usage:{input_tokens:completion.inputTokens,output_tokens:completion.outputTokens,estimated_cost_usd:estimateCostUsd(completion.model,completion.inputTokens,completion.outputTokens)}})
+    res.json({reply, approved_knowledge_available:knowledge.map(item=>item.name), no_approved_knowledge:knowledge.length===0, would_handoff:handoff, usage:{input_tokens:completion.inputTokens,output_tokens:completion.outputTokens,estimated_cost_usd:estimateCostUsd(completion.model,completion.inputTokens,completion.outputTokens)}})
   } catch(error) {
     if(agent) await supabase.from('ai_agent_test_events').insert({customer_id:req.workspace.customerId,agent_id:agent.id,actor_user_id:req.workspace.userId,outcome:'failed',knowledge_item_count:0}).catch(()=>{})
     res.status(400).json({error:error.message || 'Unable to test draft AI Agent'})
