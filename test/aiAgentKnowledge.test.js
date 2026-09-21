@@ -10,3 +10,12 @@ test('editable draft knowledge excludes archived and non-Text items', () => {
   ]
   assert.deepEqual(activeTextKnowledge(rows).map(item => item.id), ['new'])
 })
+
+
+test('activated knowledge snapshots keep their original text after shared content is edited', () => {
+  const { knowledgeSnapshot } = require('../lib/aiAgentKnowledge')
+  const source = [{ id: 'content-a', name: 'Offers', text_content: 'Roll bar K6,500', content_type: 'TEXT', archived_at: null }]
+  const frozen = knowledgeSnapshot(source)
+  source[0].text_content = 'Roll bar K6,200'
+  assert.deepEqual(frozen, [{ id: 'content-a', name: 'Offers', text_content: 'Roll bar K6,500' }])
+})
