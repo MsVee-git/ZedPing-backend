@@ -5,6 +5,7 @@ const { requireAdmin } = require('../middleware/auth')
 const { sendTextMessage } = require('../lib/whatsapp')
 const { mayResolve } = require('../lib/conversationState')
 const { recordConversationEvent } = require('../lib/conversationEvents')
+const { handoffActiveFlowForConversation } = require('../lib/chatbotExecution')
 
 const CONVERSATION_FIELDS = 'id, customer_id, whatsapp_number_id, contact_id, status, control_mode, assigned_user_id, handoff_reason, handoff_at, taken_over_at, resolved_at, resolved_by_user_id, last_message_at, last_inbound_at, last_outbound_at, unread_count, created_at, updated_at, contacts(id,name,phone_number,tag)'
 
@@ -165,6 +166,7 @@ router.post('/:id/handoff', async (req, res) => {
       updated_at: now
     }).eq('id', conversation.id).eq('customer_id', req.workspace.customerId).select(CONVERSATION_FIELDS).single()
     if (error) throw error
+    await handoffActiveFlowForConversation({ customerId: req.workspace.customerId, whatsappNumberId: conversation.whatsapp_number_id, conversationId: conversation.id, reason: 'manual_handoff' })
     await recordConversationEvent({ customerId: req.workspace.customerId, conversationId: conversation.id, actorUserId: req.workspace.userId, eventType: 'handoff_requested', metadata: { assigned: Boolean(requestedAssignee) } })
     return res.json({ conversation: data })
   } catch (error) {
@@ -194,6 +196,7 @@ router.post('/:id/take', async (req, res) => {
       if (!current) return res.status(404).json({ error: 'Conversation not found' })
       return res.status(409).json({ error: 'Another team member has already taken or changed this conversation', conversation: current })
     }
+    await handoffActiveFlowForConversation({ customerId: req.workspace.customerId, whatsappNumberId: data.whatsapp_number_id, conversationId: data.id, reason: 'manual_takeover' })
     await recordConversationEvent({ customerId: req.workspace.customerId, conversationId: data.id, actorUserId: req.workspace.userId, eventType: 'conversation_taken' })
     return res.json({ conversation: data })
   } catch {
