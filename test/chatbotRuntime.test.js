@@ -36,7 +36,11 @@ test('publish rejects ambiguous choices and automatic loops', () => {
   const duplicate = structuredClone(complete)
   duplicate.steps[2].choices[1] = { id: 'duplicate', label: 'Service', outcome: 'end' }
   assert.throws(() => validateDefinition(duplicate), /unambiguous/)
-  const loop = { entry_step_key: 'a', steps: [
+  const loop = { entry_step_key: 'select', steps: [
+    { id: 'select', type: 'choose_option', text: 'Choose', choices: [
+      { id: 'loop', label: 'Loop', next_step_id: 'a' },
+      { id: 'end_choice', label: 'End', next_step_id: 'end' }
+    ] },
     { id: 'a', type: 'send_message', text: 'A', next_step_id: 'b' },
     { id: 'b', type: 'send_message', text: 'B', next_step_id: 'a' },
     { id: 'end', type: 'end' }
