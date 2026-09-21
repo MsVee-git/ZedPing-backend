@@ -61,7 +61,7 @@ router.get('/activity', async (req, res) => {
 
 router.get('/', async (req, res) => {
   const { data, error } = await supabase.from('chatbot_flows')
-    .select('id,name,customer_id,whatsapp_number_id,is_active,lifecycle_status,current_published_version_id,created_at,updated_at,archived_at')
+    .select('id,name,customer_id,whatsapp_number_id,is_active,lifecycle_status,current_published_version_id,created_at,draft_updated_at,archived_at')
     .eq('customer_id', req.workspace.customerId).is('archived_at', null).order('created_at', { ascending: false })
   if (error) return res.status(500).json({ error: 'Unable to load chatbot flows' })
   res.json(data || [])
@@ -120,7 +120,7 @@ router.post('/:id/publish', requireAdmin, async (req, res) => {
     }).select().single()
     if (versionError) throw versionError
     const { data, error } = await supabase.from('chatbot_flows').update({
-      current_published_version_id: version.id, lifecycle_status: 'published', is_active: true, updated_at: new Date().toISOString()
+      current_published_version_id: version.id, lifecycle_status: 'published', is_active: true
     }).eq('id', flow.id).eq('customer_id', req.workspace.customerId).select().single()
     if (error) throw error
     res.json({ flow: data, version: { id: version.id, version: version.version, published_at: version.published_at } })
@@ -130,7 +130,7 @@ router.post('/:id/publish', requireAdmin, async (req, res) => {
 router.post('/:id/pause', requireAdmin, async (req, res) => {
   try {
     const flow = await flowForWorkspace(req.workspace.customerId, req.params.id)
-    const { data, error } = await supabase.from('chatbot_flows').update({ lifecycle_status: 'paused', is_active: false, updated_at: new Date().toISOString() })
+    const { data, error } = await supabase.from('chatbot_flows').update({ lifecycle_status: 'paused', is_active: false })
       .eq('id', flow.id).eq('customer_id', req.workspace.customerId).select().single()
     if (error) throw error
     res.json(data)
@@ -141,7 +141,7 @@ router.post('/:id/resume', requireAdmin, async (req, res) => {
   try {
     const flow = await flowForWorkspace(req.workspace.customerId, req.params.id)
     if (flow.lifecycle_status === 'archived' || !flow.current_published_version_id) throw new Error('Only a previously published flow can be resumed')
-    const { data, error } = await supabase.from('chatbot_flows').update({ lifecycle_status: 'published', is_active: true, updated_at: new Date().toISOString() })
+    const { data, error } = await supabase.from('chatbot_flows').update({ lifecycle_status: 'published', is_active: true })
       .eq('id', flow.id).eq('customer_id', req.workspace.customerId).select().single()
     if (error) throw error
     res.json(data)
@@ -152,7 +152,7 @@ router.post('/:id/archive', requireAdmin, async (req, res) => {
   try {
     const flow = await flowForWorkspace(req.workspace.customerId, req.params.id)
     const now = new Date().toISOString()
-    const { data, error } = await supabase.from('chatbot_flows').update({ lifecycle_status: 'archived', is_active: false, archived_at: now, updated_at: now })
+    const { data, error } = await supabase.from('chatbot_flows').update({ lifecycle_status: 'archived', is_active: false, archived_at: now })
       .eq('id', flow.id).eq('customer_id', req.workspace.customerId).select().single()
     if (error) throw error
     res.json(data)
