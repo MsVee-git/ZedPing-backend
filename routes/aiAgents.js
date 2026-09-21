@@ -181,7 +181,7 @@ router.post('/:id/test', requireAdmin, async (req,res) => {
     const completion=await getAICompletion(prompt,messages,null)
     const handoff=wouldHandoff(agent.zoe_configuration,messages,knowledge.length>0)
     await supabase.from('ai_agent_test_events').insert({customer_id:req.workspace.customerId,agent_id:agent.id,actor_user_id:req.workspace.userId,outcome:handoff?'would_handoff':'test_replied',knowledge_item_count:knowledge.length,input_tokens:completion.inputTokens,output_tokens:completion.outputTokens,estimated_cost_usd:estimateCostUsd(completion.model,completion.inputTokens,completion.outputTokens)})
-    res.json({reply:completion.text, knowledge_used:knowledge.map(item=>item.name), no_approved_knowledge:knowledge.length===0, would_handoff:handoff, usage:{input_tokens:completion.inputTokens,output_tokens:completion.outputTokens,estimated_cost_usd:estimateCostUsd(completion.model,completion.inputTokens,completion.outputTokens)}})
+    res.json({reply:completion.text, approved_knowledge_available:knowledge.map(item=>item.name), no_approved_knowledge:knowledge.length===0, would_handoff:handoff, usage:{input_tokens:completion.inputTokens,output_tokens:completion.outputTokens,estimated_cost_usd:estimateCostUsd(completion.model,completion.inputTokens,completion.outputTokens)}})
   } catch(error) {
     if(agent) await supabase.from('ai_agent_test_events').insert({customer_id:req.workspace.customerId,agent_id:agent.id,actor_user_id:req.workspace.userId,outcome:'failed',knowledge_item_count:0}).catch(()=>{})
     res.status(400).json({error:error.message || 'Unable to test draft AI Agent'})
@@ -202,7 +202,7 @@ async function liveReadiness(customerId, agent) {
   await workspaceNumber(customerId, agent.whatsapp_number_id)
   const knowledge = await knowledgeForAgent(customerId, agent.id, true)
   const links = await selectedKnowledge(customerId, knowledge.map(item => item.id))
-  if (links.length !== knowledge.length) throw new Error('Approved knowledge is no longer eligible')
+  if (links.length !== knowledge.length || !knowledge.length) throw new Error('Select at least one eligible approved Text knowledge item before activation')
   const handoff = agent.zoe_configuration?.handoff
   if (!handoff || typeof handoff !== 'object') throw new Error('Configure handoff behaviour before activation')
   const { data: conflicts, error: conflictError } = await supabase.from('ai_agents').select('id')
@@ -245,15 +245,19 @@ router.post('/:id/activate', requireAdmin, async (req,res) => {
     const version = Number(agent.configuration_version || 1) + 1
     const snapshotConfig = { name:agent.name, template_key:agent.zoe_template_key, configuration:agent.zoe_configuration || {}, whatsapp_number_id:agent.whatsapp_number_id }
     const knowledgeSnapshot = knowledge.map(item => ({ id:item.id, name:item.name, text_content:String(item.text_content || '').slice(0,3000) }))
-    const { data, error } = await supabase.from('ai_agents').update({
-      lifecycle_status:'active', is_active:true, configuration_version:version, archived_at:null, archive_reason:null
-    }).eq('id',agent.id).eq('customer_id',req.workspace.customerId).select().single()
-    if (error) throw error
+    // Create the immutable configuration before making it live. If the later lifecycle
+    // compare-and-set loses a race, the harmless unreferenced snapshot remains inactive.
     const { error: versionError } = await supabase.from('ai_agent_configuration_versions').insert({
       customer_id:req.workspace.customerId, agent_id:agent.id, version, configuration:snapshotConfig,
       knowledge_snapshot:knowledgeSnapshot, activated_at:new Date().toISOString(), created_by:req.workspace.userId
     })
     if (versionError) throw versionError
+    const { data, error } = await supabase.from('ai_agents').update({
+      lifecycle_status:'active', is_active:true, configuration_version:version, archived_at:null, archive_reason:null
+    }).eq('id',agent.id).eq('customer_id',req.workspace.customerId)
+      .eq('lifecycle_status',agent.lifecycle_status).eq('configuration_version',agent.configuration_version).select().maybeSingle()
+    if (error) throw error
+    if (!data) throw new Error('AI Agent changed before activation; review it again') 
     res.json({agent:safeAgent(data,knowledge.map(({text_content,...safe})=>safe)), status:'active'})
   } catch(error) { res.status(error?.code === '23505' ? 409 : 400).json({error:error.message || 'Unable to activate AI Agent'}) }
 })
