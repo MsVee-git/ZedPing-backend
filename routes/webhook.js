@@ -15,7 +15,7 @@ const { inboundEventPayload, isDuplicateInboundEventError } = require('../lib/in
 const { selectSoleActiveAgent } = require('../lib/aiAgentSelection')
 const { startFlow, continueFlow } = require('../lib/chatbotExecution')
 const { normalizePhone } = require('../lib/contactImport')
-const { buildLiveSystem, configuredHandoff, handoffReply, lacksLexicalSupport, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
+const { buildLiveSystem, configuredHandoff, handoffReply, isCustomerSafeReply, hasNaturalTeamTransition, lacksLexicalSupport, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
 
 router.get('/', (req, res) => {
   const received = Buffer.from(String(req.query['hub.verify_token'] || ''))
@@ -270,6 +270,32 @@ async function startLiveZoeSession(ctx) {
   return runLiveAiTurn(ctx, session, agent, version)
 }
 
+async function transitionAiToHandoff(ctx, session, agent, reason) {
+  const now = new Date().toISOString()
+  await closeActiveAiSessionsForConversation({
+    customerId: ctx.customerId,
+    whatsappNumberId: ctx.number.id,
+    conversationId: ctx.conversation.id,
+    contactPhone: ctx.from,
+    reason: 'ai_' + reason
+  })
+  const { data, error } = await supabase.from('conversations').update({
+    status: 'needs_attention',
+    control_mode: 'needs_attention',
+    assigned_user_id: null,
+    handoff_reason: 'Requested by assistant',
+    handoff_at: now,
+    updated_at: now
+  }).eq('id', ctx.conversation.id).eq('customer_id', ctx.customerId).select().maybeSingle()
+  if (error || !data) throw error || new Error('Conversation is unavailable for handoff')
+  await recordConversationEvent({
+    customerId: ctx.customerId,
+    conversationId: data.id,
+    eventType: 'handoff_requested',
+    metadata: { source: 'ai_agent', reason }
+  })
+}
+
 async function handoffLiveAi(ctx, session, agent, reason, reply) {
   if (reply) {
     try { await outgoing(ctx, reply) } catch (_) { /* Team Inbox handoff remains the safe failure path. */ }
@@ -281,9 +307,9 @@ async function handoffLiveAi(ctx, session, agent, reason, reply) {
 async function runLiveAiTurn(ctx, session, agent, version) {
   const live = buildLiveSystem(agent, version)
   const configured = configuredHandoff(live.configuration, ctx.body)
-  if (configured) return handoffLiveAi(ctx, session, agent, configured, handoffReply(configured))
+  if (configured) return handoffLiveAi(ctx, session, agent, configured, handoffReply(configured, ctx.body))
   if (live.configuration?.handoff?.unknown !== false && lacksLexicalSupport(ctx.body, live.knowledge)) {
-    return handoffLiveAi(ctx, session, agent, 'no_approved_answer', handoffReply('no_approved_answer'))
+    return handoffLiveAi(ctx, session, agent, 'no_approved_answer', handoffReply('no_approved_answer', ctx.body))
   }
 
   const history = boundedHistory([...(session.messages || []), { role: 'user', content: ctx.body }])
@@ -291,10 +317,20 @@ async function runLiveAiTurn(ctx, session, agent, version) {
   try {
     const completion = await getAICompletion(live.prompt, history, null)
     if (!completion.text) throw new Error('AI response was empty')
+    const candidate = removeHandoffMarker(completion.text)
     if (requestsModelHandoff(completion.text) && live.configuration?.handoff?.unknown !== false) {
-      return handoffLiveAi(ctx, session, agent, 'no_approved_answer', removeHandoffMarker(completion.text) || handoffReply('no_approved_answer'))
+      const reply = isCustomerSafeReply(candidate) && hasNaturalTeamTransition(candidate)
+        ? candidate
+        : handoffReply('no_approved_answer', ctx.body)
+      return handoffLiveAi(ctx, session, agent, 'no_approved_answer', reply)
     }
-    const reply = removeHandoffMarker(completion.text)
+    if (!isCustomerSafeReply(candidate)) {
+      if (live.configuration?.handoff?.unknown !== false) {
+        return handoffLiveAi(ctx, session, agent, 'no_approved_answer', handoffReply('no_approved_answer', ctx.body))
+      }
+      throw new Error('AI response was not customer-safe')
+    }
+    const reply = candidate
     if (!reply) throw new Error('AI response was empty')
     await outgoing(ctx, reply)
     const now = new Date()
