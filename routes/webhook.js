@@ -15,6 +15,7 @@ const { inboundEventPayload, isDuplicateInboundEventError } = require('../lib/in
 const { selectSoleActiveAgent } = require('../lib/aiAgentSelection')
 const { startFlow, continueFlow } = require('../lib/chatbotExecution')
 const { normalizePhone } = require('../lib/contactImport')
+const { buildLiveSystem, configuredHandoff, handoffReply, lacksLexicalSupport, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
 
 router.get('/', (req, res) => {
   const received = Buffer.from(String(req.query['hub.verify_token'] || ''))
@@ -167,6 +168,7 @@ async function processMessage(ctx) {
   }
 
   if (await checkAISession(ctx)) return
+  if (await startLiveZoeSession(ctx)) return
   if (await continueFlow(ctx, outgoing)) return
   await checkAutomations(ctx)
 }
@@ -226,104 +228,98 @@ async function handoffFromAutomation(ctx, automation) {
   await recordConversationEvent({ customerId: ctx.customerId, conversationId: data.id, eventType: 'handoff_requested', metadata: { source: 'automation' } })
 }
 
-async function startLegacyAI(ctx) {
-  const { data: agents, error: agentError } = await supabase.from('ai_agents').select('*')
+async function isApprovedTestContact(ctx, agentId) {
+  const phone = normalizePhone(ctx.from)
+  const { data, error } = await supabase.from('ai_agent_test_contacts').select('id')
+    .eq('customer_id', ctx.customerId).eq('agent_id', agentId).eq('phone_e164', phone).maybeSingle()
+  if (error) throw error
+  return Boolean(data)
+}
+
+async function loadLiveVersion(ctx, agent) {
+  const { data, error } = await supabase.from('ai_agent_configuration_versions')
+    .select('version,configuration,knowledge_snapshot,activated_at')
+    .eq('customer_id', ctx.customerId).eq('agent_id', agent.id)
+    .eq('version', agent.configuration_version).not('activated_at', 'is', null).maybeSingle()
+  if (error) throw error
+  return data || null
+}
+
+async function startLiveZoeSession(ctx) {
+  const { data: agents, error } = await supabase.from('ai_agents').select('*')
     .eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id)
-    .eq('lifecycle_status', 'active').eq('is_active', true).limit(2)
-  if (agentError) throw agentError
+    .eq('lifecycle_status', 'active').eq('is_active', true).is('legacy_contained_at', null).limit(2)
+  if (error) throw error
   const agent = selectSoleActiveAgent(agents)
   if (!agent || !ctx.contact?.id || !ctx.conversation?.id) return false
+  if (!(await isApprovedTestContact(ctx, agent.id))) return false
+  const version = await loadLiveVersion(ctx, agent)
+  if (!version) return false
   const now = new Date()
-  const { error: sessionError } = await supabase.from('ai_agent_sessions').insert({
+  const { data: session, error: sessionError } = await supabase.from('ai_agent_sessions').insert({
     customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, agent_id: agent.id,
     agent_version: agent.configuration_version, contact_phone: ctx.from, contact_id: ctx.contact.id,
     conversation_id: ctx.conversation.id, messages: [], status: 'active',
     started_at: now.toISOString(), last_activity_at: now.toISOString(),
     expires_at: new Date(now.getTime() + SESSION_IDLE_MS).toISOString()
-  })
-  if (sessionError && !isDuplicateInboundEventError(sessionError)) throw sessionError
+  }).select().maybeSingle()
+  if (sessionError) {
+    if (isDuplicateInboundEventError(sessionError)) return false
+    throw sessionError
+  }
+  return runLiveAiTurn(ctx, session, agent, version)
+}
+
+async function handoffLiveAi(ctx, session, agent, reason, reply) {
+  if (reply) {
+    try { await outgoing(ctx, reply) } catch (_) { /* Team Inbox handoff remains the safe failure path. */ }
+  }
+  await transitionAiToHandoff(ctx, session, agent, reason)
   return true
 }
 
-async function executeAutomation(ctx, automation) {
-  const action = automation.action_config || {}
-  const kind = action.kind || (automation.chatbot_flow_id ? 'start_chatbot_flow' : 'send_text')
-  await recordAutomationEvent(ctx, 'triggered', 'success', { rule_kind: automation.automation_type || 'legacy_keyword', action_kind: kind }, automation.id)
-  if (kind === 'human_handoff') {
-    await handoffFromAutomation(ctx, automation)
-    await recordAutomationEvent(ctx, 'handoff_initiated', 'success', { action_kind: kind }, automation.id)
-    return
+async function runLiveAiTurn(ctx, session, agent, version) {
+  const live = buildLiveSystem(agent, version)
+  const configured = configuredHandoff(live.configuration, ctx.body)
+  if (configured) return handoffLiveAi(ctx, session, agent, configured, handoffReply(configured))
+  if (live.configuration?.handoff?.unknown !== false && lacksLexicalSupport(ctx.body, live.knowledge)) {
+    return handoffLiveAi(ctx, session, agent, 'no_approved_answer', handoffReply('no_approved_answer'))
   }
-  if (kind === 'start_chatbot_flow' || automation.chatbot_flow_id) {
-    await startFlow(ctx, automation.chatbot_flow_id, outgoing)
-    await recordAutomationEvent(ctx, 'response_sent', 'success', { action_kind: 'start_chatbot_flow' }, automation.id)
-    return
-  }
-  if ((automation.trigger_value || '').trim().toUpperCase() === 'CHAT' && !automation.automation_type) {
-    if (await startLegacyAI(ctx)) return
-  }
-  const body = await responseBody(ctx, automation)
-  const message = await outgoing(ctx, body)
-  await recordAutomationEvent(ctx, 'response_sent', 'success', { action_kind: kind, content_type: action.kind === 'content_library' ? 'content_library' : 'written_text' }, automation.id)
-  return message
-}
 
-async function runWelcome(ctx, automation) {
-  const claimed = await claimWelcome(ctx, automation.id)
-  if (!claimed) {
-    await recordAutomationEvent(ctx, 'skipped', 'skipped', { reason: 'welcome_already_delivered' }, automation.id)
-    return false
-  }
+  const history = boundedHistory([...(session.messages || []), { role: 'user', content: ctx.body }])
+  const started = Date.now()
   try {
-    const message = await executeAutomation(ctx, automation)
-    await completeWelcome(ctx, message?.id || null)
+    const completion = await getAICompletion(live.prompt, history, null)
+    if (!completion.text) throw new Error('AI response was empty')
+    if (requestsModelHandoff(completion.text) && live.configuration?.handoff?.unknown !== false) {
+      return handoffLiveAi(ctx, session, agent, 'no_approved_answer', removeHandoffMarker(completion.text) || handoffReply('no_approved_answer'))
+    }
+    const reply = removeHandoffMarker(completion.text)
+    if (!reply) throw new Error('AI response was empty')
+    await outgoing(ctx, reply)
+    const now = new Date()
+    const nextHistory = boundedHistory([...history, { role: 'assistant', content: reply }])
+    const { error: updateError } = await supabase.from('ai_agent_sessions').update({
+      messages: nextHistory, updated_at: now.toISOString(), last_activity_at: now.toISOString(),
+      expires_at: new Date(now.getTime() + SESSION_IDLE_MS).toISOString()
+    }).eq('id', session.id).eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).eq('status', 'active')
+    if (updateError) throw updateError
+    await recordAiExecutionEvent(supabase, {
+      customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
+      agentVersion: session.agent_version, model: completion.model, outcome: 'replied', executionMode: 'live',
+      durationMs: Date.now() - started, inputTokens: completion.inputTokens, outputTokens: completion.outputTokens,
+      estimatedCostUsd: estimateCostUsd(completion.model, completion.inputTokens, completion.outputTokens),
+      retrievalItemIds: live.knowledge.map(item => item.id)
+    }).catch(() => {})
     return true
-  } catch (error) {
-    await releaseWelcome(ctx)
-    await recordAutomationEvent(ctx, 'error', 'error', { reason: 'welcome_send_failed' }, automation.id).catch(() => {})
-    throw error
+  } catch (_) {
+    await recordAiExecutionEvent(supabase, {
+      customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
+      agentVersion: session.agent_version, model: BETA_MODEL, outcome: 'failed', executionMode: 'live',
+      durationMs: Date.now() - started, errorCategory: 'provider_or_runtime_error'
+    }).catch(() => {})
+    return handoffLiveAi(ctx, session, agent, 'ai_execution_failed', null)
   }
-}
-
-async function checkAutomations(ctx) {
-  const { data: list, error } = await supabase.from('automations').select('*')
-    .eq('customer_id', ctx.customerId).eq('is_active', true).is('archived_at', null)
-    .order('priority', { ascending: true }).order('created_at', { ascending: true }).order('id', { ascending: true })
-  if (error) throw error
-
-  const explicit = selectExplicitAutomation(list, ctx.body)
-  if (explicit) return executeAutomation(ctx, explicit)
-
-  const settings = await workspaceAutomationSettings(ctx.customerId)
-  if (settings && isOutsideBusinessHours(settings)) {
-    const away = selectAwayAutomation(list)
-    if (away) return executeAutomation(ctx, away)
-  }
-
-  const welcome = selectWelcomeAutomation(list)
-  if (welcome && await runWelcome(ctx, welcome)) return
-
-  const fallback = selectDefaultAutomation(list)
-  if (fallback) return executeAutomation(ctx, fallback)
-}
-
-
-async function transitionAiToHandoff(ctx, session, agent, reason) {
-  const now = new Date().toISOString()
-  const { error: sessionError } = await supabase.from('ai_agent_sessions').update({
-    status: 'handed_off', ended_at: now, completion_reason: reason, last_activity_at: now
-  }).eq('id', session.id).eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).eq('status', 'active')
-  if (sessionError) throw sessionError
-  const { data: conversation, error: conversationError } = await supabase.from('conversations').update({
-    status: 'needs_attention', control_mode: 'needs_attention', assigned_user_id: null,
-    handoff_reason: 'Requested by AI assistant', handoff_at: now, updated_at: now
-  }).eq('id', ctx.conversation.id).eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).select().maybeSingle()
-  if (conversationError || !conversation) throw conversationError || new Error('Conversation is unavailable for AI handoff')
-  await recordConversationEvent({ customerId: ctx.customerId, conversationId: conversation.id, eventType: 'handoff_requested', metadata: { source: 'ai_agent' } })
-  await recordAiExecutionEvent(supabase, {
-    customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
-    agentVersion: session.agent_version, model: BETA_MODEL, outcome: 'handed_off'
-  }).catch(() => {})
 }
 
 async function checkAISession(ctx) {
@@ -334,52 +330,25 @@ async function checkAISession(ctx) {
   if (!session) return false
   const agent = session.ai_agents
   if (!agent || agent.customer_id !== ctx.customerId || agent.whatsapp_number_id !== ctx.number.id ||
-      agent.lifecycle_status !== 'active' || !agent.is_active) return false
-
+      agent.lifecycle_status !== 'active' || !agent.is_active || !(await isApprovedTestContact(ctx, agent.id))) {
+    await supabase.from('ai_agent_sessions').update({
+      status:'cancelled', ended_at:new Date().toISOString(), completion_reason:'agent_not_live_or_contact_not_allowed'
+    }).eq('id',session.id).eq('customer_id',ctx.customerId).eq('status','active')
+    return false
+  }
   if (sessionExpired(session)) {
     await supabase.from('ai_agent_sessions').update({
       status: 'expired', ended_at: new Date().toISOString(), completion_reason: 'idle_timeout'
     }).eq('id', session.id).eq('customer_id', ctx.customerId).eq('status', 'active')
     await recordAiExecutionEvent(supabase, {
       customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
-      agentVersion: session.agent_version, model: BETA_MODEL, outcome: 'blocked', errorCategory: 'session_expired'
+      agentVersion: session.agent_version, model: BETA_MODEL, outcome: 'blocked', executionMode:'live', errorCategory: 'session_expired'
     }).catch(() => {})
     return false
   }
-
-  if (isHandoffRequested(agent, ctx.body)) {
-    await transitionAiToHandoff(ctx, session, agent, 'customer_requested_handoff')
-    return true
-  }
-
-  const history = boundedHistory([...(session.messages || []), { role: 'user', content: ctx.body }])
-  const started = Date.now()
-  try {
-    const completion = await getAICompletion(agent.system_prompt, history, agent)
-    if (!completion.text) throw new Error('AI response was empty')
-    const nextHistory = boundedHistory([...history, { role: 'assistant', content: completion.text }])
-    const now = new Date()
-    const { error: updateError } = await supabase.from('ai_agent_sessions').update({
-      messages: nextHistory, updated_at: now.toISOString(), last_activity_at: now.toISOString(),
-      expires_at: new Date(now.getTime() + SESSION_IDLE_MS).toISOString()
-    }).eq('id', session.id).eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).eq('status', 'active')
-    if (updateError) throw updateError
-    await outgoing(ctx, completion.text)
-    await recordAiExecutionEvent(supabase, {
-      customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
-      agentVersion: session.agent_version, model: completion.model, outcome: 'replied',
-      durationMs: Date.now() - started, inputTokens: completion.inputTokens, outputTokens: completion.outputTokens,
-      estimatedCostUsd: estimateCostUsd(completion.model, completion.inputTokens, completion.outputTokens)
-    }).catch(() => {})
-    return true
-  } catch (error) {
-    await recordAiExecutionEvent(supabase, {
-      customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
-      agentVersion: session.agent_version, model: BETA_MODEL, outcome: 'failed',
-      durationMs: Date.now() - started, errorCategory: 'provider_or_runtime_error'
-    }).catch(() => {})
-    throw error
-  }
+  const version = await loadLiveVersion(ctx, agent)
+  if (!version) return handoffLiveAi(ctx, session, agent, 'active_version_unavailable', null)
+  return runLiveAiTurn(ctx, session, agent, version)
 }
 
 module.exports = router
