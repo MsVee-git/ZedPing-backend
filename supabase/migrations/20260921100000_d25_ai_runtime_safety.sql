@@ -151,8 +151,7 @@ begin
     where a.id = new.agent_id
       and a.customer_id = new.customer_id
       and a.whatsapp_number_id = new.whatsapp_number_id
-      and a.lifecycle_status = 'active'
-      and a.is_active
+      and (new.status <> 'active' or (a.lifecycle_status = 'active' and a.is_active))
       and n.customer_id = new.customer_id
       and n.status = 'connected'
       and c.customer_id = new.customer_id
