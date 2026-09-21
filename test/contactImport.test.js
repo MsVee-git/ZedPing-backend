@@ -56,3 +56,10 @@ test('import route is manager-only and derives workspace server-side', () => {
   assert.match(route, /eq\('customer_id', req\.workspace\.customerId\)/)
   assert.match(route, /execute_contact_import/)
 })
+
+
+test('webhook lookup recognises imported canonical contacts before creating a new one', () => {
+  const webhook = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'routes', 'webhook.js'), 'utf8')
+  assert.match(webhook, /eq\('phone_e164', canonical\)/)
+  assert.match(webhook, /source: 'whatsapp'/)
+})
