@@ -3,6 +3,7 @@ const router = express.Router()
 const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
 const { validateTimezone, validateBusinessHours } = require('../lib/automationRuntime')
+const { templates, recommend, validateProvenance } = require('../lib/automationLibrary')
 
 const TYPES = new Set(['welcome', 'away', 'keyword', 'faq', 'lead_capture', 'human_handoff', 'custom'])
 const ACTIONS = new Set(['send_text', 'content_library', 'start_chatbot_flow', 'human_handoff'])
@@ -57,7 +58,7 @@ async function assertFlow(customerId, flowId) {
 }
 
 async function readAutomation(input = {}, customerId) {
-  const allowed = ['automation_type', 'trigger_type', 'trigger_value', 'trigger_config', 'condition_config', 'action_config', 'message_template', 'chatbot_flow_id', 'content_library_item_id', 'priority']
+  const allowed = ['automation_type', 'trigger_type', 'trigger_value', 'trigger_config', 'condition_config', 'action_config', 'message_template', 'chatbot_flow_id', 'content_library_item_id', 'priority', 'library_template_id', 'library_template_version']
   if (Object.keys(input).some((key) => !allowed.includes(key))) throw new Error('Invalid automation request')
   // Legacy DEFAULT rows predate the typed automation model. Preserve their
   // fallback semantics on edit instead of converting them into a literal
@@ -114,8 +115,52 @@ async function readAutomation(input = {}, customerId) {
   }
   if (automation_type === 'lead_capture') action_config.lead_capture = leadCapture(action_config.lead_capture)
   if (automation_type === 'human_handoff' && kind !== 'human_handoff') throw new Error('Human handoff must use the handoff action')
-  return { automation_type, trigger_type: 'keyword', trigger_value: trigger_config.phrases?.[0] || automation_type.toUpperCase(), trigger_config, condition_config, action_config, message_template, chatbot_flow_id, content_library_item_id, priority }
+  const libraryTemplate = validateProvenance({ id: input.library_template_id, version: input.library_template_version, automation_type })
+  return { automation_type, trigger_type: 'keyword', trigger_value: trigger_config.phrases?.[0] || automation_type.toUpperCase(), trigger_config, condition_config, action_config, message_template, chatbot_flow_id, content_library_item_id, priority, library_template_id: libraryTemplate?.id || null, library_template_version: libraryTemplate?.version || null }
 }
+
+
+async function libraryConflicts(customerId, template, phraseList, excludeId = null) {
+  if (!template) return []
+  let query = supabase.from('automations').select('id,automation_type,trigger_value,trigger_config,is_active')
+    .eq('customer_id', customerId).eq('is_active', true).is('archived_at', null)
+  if (excludeId) query = query.neq('id', excludeId)
+  const { data, error } = await query
+  if (error) throw error
+  const active = data || []
+  const conflicts = []
+  if (template.duplicate_strategy === 'single') {
+    active.filter((item) => item.automation_type === template.automation_type).forEach((item) => conflicts.push({ id: item.id, kind: 'already_configured', label: template.title }))
+  }
+  if (template.duplicate_strategy === 'phrase') {
+    const wanted = new Set((phraseList || []).map((value) => String(value || '').trim().toUpperCase()).filter(Boolean))
+    active.forEach((item) => {
+      const existing = item?.trigger_config?.phrases || (item.trigger_value ? [item.trigger_value] : [])
+      const matched = existing.find((value) => wanted.has(String(value || '').trim().toUpperCase()))
+      if (matched) conflicts.push({ id: item.id, kind: 'phrase_collision', phrase: String(matched) })
+    })
+  }
+  return conflicts
+}
+
+router.get('/library', async (req, res) => {
+  const [{ data: customer, error: customerError }, { data: discovery, error: discoveryError }] = await Promise.all([
+    supabase.from('customers').select('industry').eq('id', req.workspace.customerId).maybeSingle(),
+    supabase.from('workspace_discovery').select('goals').eq('customer_id', req.workspace.customerId).maybeSingle()
+  ])
+  if (customerError || discoveryError) return res.status(500).json({ error: 'Unable to load Automation Library' })
+  res.json({ templates: templates(), recommendations: recommend({ industry: customer?.industry, goals: discovery?.goals || [] }) })
+})
+
+router.post('/library/preflight', requireAdmin, async (req, res) => {
+  try {
+    const template = validateProvenance({ id: req.body?.library_template_id, version: req.body?.library_template_version, automation_type: req.body?.automation_type })
+    if (!template) throw new Error('Automation template provenance is required')
+    const phraseList = phrases(req.body?.phrases || [], template.duplicate_strategy === 'phrase')
+    const conflicts = await libraryConflicts(req.workspace.customerId, template, phraseList, req.body?.exclude_id || null)
+    res.json({ conflicts })
+  } catch (error) { res.status(400).json({ error: error.message || 'Unable to check automation conflicts' }) }
+})
 
 router.get('/', async (req, res) => {
   const { data, error } = await supabase.from('automations').select('*')
@@ -128,6 +173,9 @@ router.get('/', async (req, res) => {
 router.post('/', requireAdmin, async (req, res) => {
   try {
     const automation = await readAutomation(req.body, req.workspace.customerId)
+    const template = automation.library_template_id ? validateProvenance({ id: automation.library_template_id, version: automation.library_template_version, automation_type: automation.automation_type }) : null
+    const conflicts = await libraryConflicts(req.workspace.customerId, template, automation.trigger_config?.phrases || [])
+    if (conflicts.length) return res.status(409).json({ error: 'This automation conflicts with an active workspace rule', conflicts })
     const { data, error } = await supabase.from('automations').insert({ customer_id: req.workspace.customerId, ...automation, is_active: true }).select().single()
     if (error) throw error
     res.status(201).json(data)
@@ -144,6 +192,9 @@ router.patch('/:id', requireAdmin, async (req, res) => {
       return res.json(data)
     }
     const automation = await readAutomation(body, req.workspace.customerId)
+    const template = automation.library_template_id ? validateProvenance({ id: automation.library_template_id, version: automation.library_template_version, automation_type: automation.automation_type }) : null
+    const conflicts = await libraryConflicts(req.workspace.customerId, template, automation.trigger_config?.phrases || [], req.params.id)
+    if (conflicts.length) return res.status(409).json({ error: 'This automation conflicts with an active workspace rule', conflicts })
     const { data, error } = await supabase.from('automations').update({ ...automation, updated_at: new Date().toISOString() }).eq('id', req.params.id).eq('customer_id', req.workspace.customerId).is('archived_at', null).select().maybeSingle()
     if (error) throw error
     if (!data) return res.status(404).json({ error: 'Automation not found' })
