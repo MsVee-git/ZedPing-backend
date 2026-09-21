@@ -1,0 +1,11 @@
+-- D2.5 Phase 3: controlled live activation, immutable live snapshots, and workspace-scoped test contacts.
+alter table public.ai_agent_configuration_versions add column if not exists knowledge_snapshot jsonb not null default '[]'::jsonb, add column if not exists activated_at timestamptz;
+create table if not exists public.ai_agent_test_contacts (id uuid primary key default gen_random_uuid(), customer_id uuid not null references public.customers(id) on delete cascade, agent_id uuid not null references public.ai_agents(id) on delete cascade, phone_e164 text not null, created_by uuid, created_at timestamptz not null default now(), unique(agent_id, phone_e164));
+create index if not exists ai_agent_test_contacts_runtime_idx on public.ai_agent_test_contacts(customer_id, agent_id, phone_e164);
+alter table public.ai_agent_test_contacts enable row level security;
+drop policy if exists ai_agent_test_contacts_read_workspace on public.ai_agent_test_contacts;
+create policy ai_agent_test_contacts_read_workspace on public.ai_agent_test_contacts for select to authenticated using (public.is_workspace_member(customer_id));
+create or replace function public.enforce_ai_agent_test_contact_workspace_integrity() returns trigger language plpgsql set search_path=public as $$ begin if not exists (select 1 from public.ai_agents a join public.whatsapp_numbers n on n.id=a.whatsapp_number_id where a.id=new.agent_id and a.customer_id=new.customer_id and a.legacy_contained_at is null and n.customer_id=new.customer_id and n.status='connected') then raise exception 'AI test contact must belong to a scoped agent in the same workspace' using errcode='23514'; end if; return new; end; $$;
+drop trigger if exists ai_agent_test_contacts_workspace_integrity on public.ai_agent_test_contacts;
+create trigger ai_agent_test_contacts_workspace_integrity before insert or update on public.ai_agent_test_contacts for each row execute function public.enforce_ai_agent_test_contact_workspace_integrity();
+revoke all on function public.enforce_ai_agent_test_contact_workspace_integrity() from public, anon, authenticated;
