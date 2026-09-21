@@ -46,5 +46,5 @@ test('known questions remain available for normal answers while partial answers 
   assert.equal(configuredHandoff(agent.zoe_configuration, 'Tell me about vehicle servicing'), null)
   assert.equal(lacksLexicalSupport('Tell me about vehicle servicing', live.knowledge), false)
   assert.match(live.prompt, /give any directly supported part of the answer first/)
-  assert.match(live.prompt, /Let me connect you with them/)
+  assert.match(live.prompt, /offer to connect the customer with them/)
 })
