@@ -72,7 +72,7 @@ declare
   v_created integer := 0;
   v_existing integer := 0;
   v_members_added integer := 0;
-  v_member_inserted boolean;
+  v_member_rows integer := 0;
 begin
   if p_customer_id is null or p_importing_user_id is null then
     raise exception 'Workspace and importing user are required';
@@ -154,8 +154,8 @@ begin
       insert into public.contact_group_members(group_id, contact_id)
       values (p_group_id, v_contact_id)
       on conflict (group_id, contact_id) do nothing;
-      get diagnostics v_member_inserted = row_count;
-      if v_member_inserted then v_members_added := v_members_added + 1; end if;
+      get diagnostics v_member_rows = row_count;
+      if v_member_rows > 0 then v_members_added := v_members_added + 1; end if;
     end if;
   end loop;
 
