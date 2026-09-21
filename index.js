@@ -23,6 +23,7 @@ const whatsappConnectionRoutes = require('./routes/whatsappConnections')
 const conversationRoutes = require('./routes/conversations')
 const contentRoutes = require('./routes/content')
 const chatbotFlowRoutes = require('./routes/chatbotFlows')
+const aiAgentRoutes = require('./routes/aiAgents')
 const { router: teamRoutes, acceptInvitation, previewInvitation } = require('./routes/team')
 
 app.use('/webhook', webhookRoutes)
@@ -40,6 +41,7 @@ app.use('/whatsapp-connections', requireWorkspace, whatsappConnectionRoutes)
 app.use('/conversations', requireWorkspace, conversationRoutes)
 app.use('/content', requireWorkspace, contentRoutes)
 app.use('/chatbot-flows', requireWorkspace, chatbotFlowRoutes)
+app.use('/ai-agents', requireWorkspace, aiAgentRoutes)
 app.use('/team', requireWorkspace, teamRoutes)
 
 app.get('/', (req, res) => {
