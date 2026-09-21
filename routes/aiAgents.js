@@ -6,7 +6,7 @@ const { BETA_MODEL, boundedHistory, estimateCostUsd } = require('../lib/aiRuntim
 const { getAICompletion } = require('../lib/openai')
 const { normalizePhone } = require('../lib/contactImport')
 const { configuredHandoff, lacksLexicalSupport, handoffReply } = require('../lib/zoeGrounding')
-const { activeTextKnowledge } = require('../lib/aiAgentKnowledge')
+const { activeTextKnowledge, knowledgeSnapshot } = require('../lib/aiAgentKnowledge')
 
 const MAX_KNOWLEDGE_ITEMS = 5
 const MAX_KNOWLEDGE_ITEM_CHARS = 3000
@@ -280,12 +280,12 @@ router.post('/:id/activate', requireAdmin, async (req,res) => {
     const knowledge = await liveReadiness(req.workspace.customerId, agent)
     const version = Number(agent.configuration_version || 1) + 1
     const snapshotConfig = { name:agent.name, template_key:agent.zoe_template_key, configuration:agent.zoe_configuration || {}, whatsapp_number_id:agent.whatsapp_number_id }
-    const knowledgeSnapshot = knowledge.map(item => ({ id:item.id, name:item.name, text_content:String(item.text_content || '').slice(0,3000) }))
+    const snapshot = knowledgeSnapshot(knowledge)
     // Create the immutable configuration before making it live. If the later lifecycle
     // compare-and-set loses a race, the harmless unreferenced snapshot remains inactive.
     const { error: versionError } = await supabase.from('ai_agent_configuration_versions').insert({
       customer_id:req.workspace.customerId, agent_id:agent.id, version, configuration:snapshotConfig,
-      knowledge_snapshot:knowledgeSnapshot, activated_at:new Date().toISOString(), created_by:req.workspace.userId
+      knowledge_snapshot:snapshot, activated_at:new Date().toISOString(), created_by:req.workspace.userId
     })
     if (versionError) throw versionError
     const { data, error } = await supabase.from('ai_agents').update({
