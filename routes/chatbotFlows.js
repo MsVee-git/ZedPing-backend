@@ -3,6 +3,7 @@ const router = express.Router()
 const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
 const { validateDefinition, simulateFlow } = require('../lib/chatbotRuntime')
+const { libraryTemplate } = require('../lib/chatbotFlowLibrary')
 
 function cleanName(value) {
   const name = String(value || '').trim()
@@ -76,6 +77,23 @@ router.get('/:id', async (req, res) => {
     if (error) throw error
     res.json({ ...flow, current_published_version: version || null })
   } catch (error) { res.status(404).json({ error: error.message || 'Chatbot flow not found' }) }
+})
+
+router.post('/from-library', requireAdmin, async (req, res) => {
+  try {
+    const template = libraryTemplate(req.body?.template_id)
+    if (!template) throw new Error('Select a supported Chatbot Flow template')
+    const whatsappNumber = await workspaceNumber(req.workspace.customerId, req.body?.whatsapp_number_id)
+    // The browser supplies only a selector. The server owns and validates the
+    // recipe definition before it becomes a workspace-scoped mutable draft.
+    const draft = await checkedDefinition(req.workspace.customerId, template.definition)
+    const { data, error } = await supabase.from('chatbot_flows').insert({
+      customer_id: req.workspace.customerId, whatsapp_number_id: whatsappNumber.id, name: template.title,
+      draft_definition: draft, draft_updated_at: new Date().toISOString(), lifecycle_status: 'draft', is_active: false
+    }).select().single()
+    if (error) throw error
+    res.status(201).json(data)
+  } catch (error) { res.status(400).json({ error: error.message || 'Unable to create a Chatbot Flow from this template' }) }
 })
 
 router.post('/', requireAdmin, async (req, res) => {
