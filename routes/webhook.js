@@ -14,6 +14,7 @@ const { recordAutomationEvent, claimWelcome, completeWelcome, releaseWelcome } =
 const { inboundEventPayload, isDuplicateInboundEventError } = require('../lib/inboundWebhookEvents')
 const { selectSoleActiveAgent } = require('../lib/aiAgentSelection')
 const { startFlow, continueFlow } = require('../lib/chatbotExecution')
+const { normalizePhone } = require('../lib/contactImport')
 
 router.get('/', (req, res) => {
   const received = Buffer.from(String(req.query['hub.verify_token'] || ''))
@@ -51,13 +52,23 @@ router.post('/', async (req, res) => {
 })
 
 async function findOrCreateContact(ctx) {
-  let { data: contact } = await supabase.from('contacts').select('*')
+  let canonical = null
+  try { canonical = normalizePhone(ctx.from) } catch {}
+  let { data: contact, error } = await supabase.from('contacts').select('*')
     .eq('customer_id', ctx.customerId).eq('phone_number', ctx.from).maybeSingle()
+  if (error) throw error
+  if (!contact && canonical) {
+    const lookup = await supabase.from('contacts').select('*')
+      .eq('customer_id', ctx.customerId).eq('phone_e164', canonical).maybeSingle()
+    if (lookup.error) throw lookup.error
+    contact = lookup.data
+  }
   if (!contact) {
-    const { data, error } = await supabase.from('contacts').insert({
-      customer_id: ctx.customerId, name: '', phone_number: ctx.from, custom_fields: {}
+    const { data, error: insertError } = await supabase.from('contacts').insert({
+      customer_id: ctx.customerId, name: '', phone_number: canonical || ctx.from,
+      phone_e164: canonical, source: 'whatsapp', custom_fields: {}
     }).select().single()
-    if (error) throw error
+    if (insertError) throw insertError
     contact = data
   }
   return contact
