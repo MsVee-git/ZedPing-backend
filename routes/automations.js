@@ -50,10 +50,14 @@ async function assertContent(customerId, contentId) {
 
 async function assertFlow(customerId, flowId) {
   if (!flowId) return null
+  // Automations may only start a current, published workspace flow. Draft,
+  // paused and archived flows must never become a hidden runtime path.
   const { data, error } = await supabase.from('chatbot_flows').select('id')
-    .eq('id', flowId).eq('customer_id', customerId).maybeSingle()
+    .eq('id', flowId).eq('customer_id', customerId)
+    .eq('lifecycle_status', 'published').eq('is_active', true).is('archived_at', null)
+    .maybeSingle()
   if (error) throw error
-  if (!data) throw new Error('Select a chatbot flow from this workspace')
+  if (!data) throw new Error('Select an active published chatbot flow from this workspace')
   return data
 }
 
