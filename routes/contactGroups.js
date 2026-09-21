@@ -1,12 +1,9 @@
 const express = require('express')
 const { requireAdmin } = require('../middleware/auth')
 const supabase = require('../lib/supabase')
+const { validateGroupName, isUniqueViolation } = require('../lib/contactGroups')
 
 const router = express.Router()
-
-function safeName(value) {
-  return String(value || '').trim().replace(/\s+/g, ' ')
-}
 
 async function findWorkspaceGroup(id, customerId) {
   const { data, error } = await supabase
@@ -35,7 +32,7 @@ async function syncGroupCount(groupId, customerId) {
 }
 
 function sendDatabaseError(res, error, fallback) {
-  if (error?.code === '23505') return res.status(409).json({ error: 'A contact group with that name already exists.' })
+  if (isUniqueViolation(error)) return res.status(409).json({ error: 'A contact group with that name already exists.' })
   console.error('Contact group operation failed', { code: error?.code, message: error?.message })
   return res.status(500).json({ error: fallback })
 }
@@ -66,9 +63,8 @@ router.get('/', async (req, res) => {
 })
 
 router.post('/', requireAdmin, async (req, res) => {
-  const name = safeName(req.body?.name)
-  if (!name) return res.status(400).json({ error: 'Enter a contact group name.' })
-  if (name.length > 100) return res.status(400).json({ error: 'Contact group names must be 100 characters or fewer.' })
+  let name
+  try { name = validateGroupName(req.body?.name) } catch (error) { return res.status(400).json({ error: error.message }) }
 
   const { data, error } = await supabase
     .from('contact_groups')
