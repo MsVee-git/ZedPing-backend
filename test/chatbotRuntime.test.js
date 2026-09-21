@@ -64,3 +64,58 @@ test('content references must be active workspace Text or Link items', () => {
   const valid = validateDefinition(flow, { contentItems: new Map([['item', { content_type: 'TEXT', archived_at: null }]]) })
   assert.equal(valid.steps[0].type, 'content')
 })
+
+
+const vehicleService = {
+  entry_step_key: 'intro',
+  steps: [
+    { id: 'intro', type: 'send_message', text: 'Vehicle intro', next_step_id: 'vehicle' },
+    { id: 'vehicle', type: 'ask_capture', text: 'What vehicle do you have?', next_step_id: 'service', capture: { key: 'vehicle', label: 'Vehicle', type: 'text', required: true, failure_action: 'handoff' } },
+    { id: 'service', type: 'choose_option', text: 'What service?', choices: [
+      { id: 'service', label: 'Vehicle Service', next_step_id: 'team' },
+      { id: 'repairs', label: 'Repairs', next_step_id: 'team' }
+    ] },
+    { id: 'team', type: 'human_handoff', reason: 'Vehicle service enquiry' }
+  ]
+}
+
+test('simulation advances valid text capture and waits at the next input step', () => {
+  const result = simulateFlow(vehicleService, ['Ford Ranger'])
+  assert.deepEqual(result.captured, { vehicle: 'Ford Ranger' })
+  assert.equal(result.waiting_for_input, true)
+  assert.equal(result.terminal, null)
+  assert.deepEqual(result.transcript.map(item => [item.speaker, item.text]), [
+    ['zedping', 'Vehicle intro'],
+    ['zedping', 'What vehicle do you have?'],
+    ['you', 'Ford Ranger'],
+    ['zedping', 'What service?\n1. Vehicle Service\n2. Repairs']
+  ])
+})
+
+test('simulation consumes a configured numbered choice and reaches handoff', () => {
+  const result = simulateFlow(vehicleService, ['Ford Ranger', '1'])
+  assert.deepEqual(result.captured, { vehicle: 'Ford Ranger' })
+  assert.equal(result.terminal, 'human_handoff')
+  assert.equal(result.waiting_for_input, false)
+})
+
+test('simulation retries one invalid answer and only hands off after a second invalid answer', () => {
+  const first = simulateFlow(complete, ['bad-email'])
+  assert.equal(first.waiting_for_input, true)
+  assert.equal(first.terminal, null)
+  assert.match(first.output.at(-1), /Enter a valid email address/)
+  const second = simulateFlow(complete, ['bad-email', 'still-not-an-email'])
+  assert.equal(second.terminal, 'handoff')
+  assert.equal(second.waiting_for_input, false)
+})
+
+test('simulation content step continues without external writes', () => {
+  const flow = { entry_step_key: 'content', steps: [
+    { id: 'content', type: 'content', content_library_item_id: 'item', next_step_id: 'end' },
+    { id: 'end', type: 'end', text: 'Done' }
+  ] }
+  const items = new Map([['item', { content_type: 'TEXT', archived_at: null }]])
+  const result = simulateFlow(flow, [], { contentItems: items })
+  assert.deepEqual(result.output, ['[Content Library item]', 'Done'])
+  assert.equal(result.terminal, 'end')
+})
