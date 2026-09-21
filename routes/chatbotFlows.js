@@ -185,10 +185,11 @@ router.post('/:id/archive', requireAdmin, async (req, res) => {
 router.post('/:id/test', requireAdmin, async (req, res) => {
   try {
     const flow = await flowForWorkspace(req.workspace.customerId, req.params.id)
-    const definition = await checkedDefinition(req.workspace.customerId, flow.draft_definition)
+    const contentItems = await contentForDefinition(req.workspace.customerId, flow.draft_definition)
+    const definition = validateDefinition(flow.draft_definition, { contentItems })
     const inputs = Array.isArray(req.body?.inputs) ? req.body.inputs.slice(0, 20).map((value) => String(value || '').slice(0, 4096)) : []
     // Pure simulation: no database writes, contact/conversation creation, or WhatsApp calls.
-    res.json({ simulation: simulateFlow(definition, inputs) })
+    res.json({ simulation: simulateFlow(definition, inputs, { contentItems }) })
   } catch (error) { res.status(400).json({ error: error.message || 'Unable to simulate chatbot flow' }) }
 })
 
