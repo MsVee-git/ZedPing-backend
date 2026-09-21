@@ -6,6 +6,7 @@ const { BETA_MODEL, boundedHistory, estimateCostUsd } = require('../lib/aiRuntim
 const { getAICompletion } = require('../lib/openai')
 const { normalizePhone } = require('../lib/contactImport')
 const { configuredHandoff, lacksLexicalSupport, handoffReply } = require('../lib/zoeGrounding')
+const { activeTextKnowledge } = require('../lib/aiAgentKnowledge')
 
 const MAX_KNOWLEDGE_ITEMS = 5
 const MAX_KNOWLEDGE_ITEM_CHARS = 3000
@@ -99,10 +100,14 @@ function wouldHandoff(config, messages, hasKnowledge) {
   return person || commercial || phrase || (handoff.unknown !== false && !hasKnowledge)
 }
 async function knowledgeForAgent(customerId, agentId, withText = false) {
-  const fields = withText ? 'content_library_item_id,content_library_items(id,name,text_content,updated_at)' : 'content_library_item_id,content_library_items(id,name,content_type)'
+  const fields = withText
+    ? 'content_library_item_id,content_library_items(id,name,text_content,content_type,archived_at,updated_at)'
+    : 'content_library_item_id,content_library_items(id,name,content_type,archived_at)'
   const { data, error } = await supabase.from('ai_agent_knowledge_items').select(fields).eq('customer_id', customerId).eq('agent_id', agentId).order('created_at')
   if (error) throw error
-  return (data || []).map(row => row.content_library_items).filter(Boolean)
+  // Draft configuration may never carry a stale archived/non-Text item back into
+  // a later save. Historical activated snapshots remain separate and immutable.
+  return activeTextKnowledge(data)
 }
 async function replaceKnowledge(customerId, agentId, items) {
   const { error: removeError } = await supabase.from('ai_agent_knowledge_items').delete().eq('customer_id', customerId).eq('agent_id', agentId)
@@ -167,7 +172,11 @@ router.patch('/:id/draft', requireAdmin, async (req,res) => {
     await replaceKnowledge(req.workspace.customerId,agent.id,knowledge)
     await snapshot(req.workspace.customerId,agent,req.workspace.userId)
     res.json({agent:safeAgent(agent,knowledge.map(({text_content,...safe})=>safe))})
-  } catch(error) { res.status(error?.code === '23505' ? 409 : 400).json({error:error.message || 'Unable to update draft AI Agent'}) }
+  } catch(error) {
+    console.warn('ai_agent_draft_update_failed', { customer_id:req.workspace.customerId, agent_id:req.params.id, code:error?.code || null, reason:String(error?.message || 'unknown').slice(0,160) })
+    const status=error?.code === '23505' ? 409 : 400
+    res.status(status).json({error:'We couldn\'t save your changes. Please check the selected approved Text items and try again.'})
+  }
 })
 router.post('/:id/test', requireAdmin, async (req,res) => {
   const started=Date.now()
