@@ -3,7 +3,10 @@ const crypto = require('crypto')
 const router = express.Router()
 const supabase = require('../lib/supabase')
 const { sendTextMessage } = require('../lib/whatsapp')
-const { getAIResponse } = require('../lib/openai')
+const { getAICompletion } = require('../lib/openai')
+const { BETA_MODEL, boundedHistory, sessionExpired, estimateCostUsd, isHandoffRequested, SESSION_IDLE_MS } = require('../lib/aiRuntime')
+const { recordAiExecutionEvent } = require('../lib/aiExecutionEvents')
+const { closeActiveAiSessionsForConversation } = require('../lib/aiAgentSessions')
 const { shouldSuppressAutomation, stateForInbound } = require('../lib/conversationState')
 const { recordConversationEvent } = require('../lib/conversationEvents')
 const { selectExplicitAutomation, selectAwayAutomation, selectWelcomeAutomation, selectDefaultAutomation, isOutsideBusinessHours } = require('../lib/automationRuntime')
@@ -214,12 +217,18 @@ async function handoffFromAutomation(ctx, automation) {
 
 async function startLegacyAI(ctx) {
   const { data: agents, error: agentError } = await supabase.from('ai_agents').select('*')
-    .eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).eq('is_active', true).limit(2)
+    .eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id)
+    .eq('lifecycle_status', 'active').eq('is_active', true).limit(2)
   if (agentError) throw agentError
   const agent = selectSoleActiveAgent(agents)
-  if (!agent) return false
+  if (!agent || !ctx.contact?.id || !ctx.conversation?.id) return false
+  const now = new Date()
   const { error: sessionError } = await supabase.from('ai_agent_sessions').insert({
-    customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, agent_id: agent.id, contact_phone: ctx.from, status: 'active'
+    customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, agent_id: agent.id,
+    agent_version: agent.configuration_version, contact_phone: ctx.from, contact_id: ctx.contact.id,
+    conversation_id: ctx.conversation.id, messages: [], status: 'active',
+    started_at: now.toISOString(), last_activity_at: now.toISOString(),
+    expires_at: new Date(now.getTime() + SESSION_IDLE_MS).toISOString()
   })
   if (sessionError && !isDuplicateInboundEventError(sessionError)) throw sessionError
   return true
@@ -288,20 +297,78 @@ async function checkAutomations(ctx) {
 }
 
 
+async function transitionAiToHandoff(ctx, session, agent, reason) {
+  const now = new Date().toISOString()
+  const { error: sessionError } = await supabase.from('ai_agent_sessions').update({
+    status: 'handed_off', ended_at: now, completion_reason: reason, last_activity_at: now
+  }).eq('id', session.id).eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).eq('status', 'active')
+  if (sessionError) throw sessionError
+  const { data: conversation, error: conversationError } = await supabase.from('conversations').update({
+    status: 'needs_attention', control_mode: 'needs_attention', assigned_user_id: null,
+    handoff_reason: 'Requested by AI assistant', handoff_at: now, updated_at: now
+  }).eq('id', ctx.conversation.id).eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).select().maybeSingle()
+  if (conversationError || !conversation) throw conversationError || new Error('Conversation is unavailable for AI handoff')
+  await recordConversationEvent({ customerId: ctx.customerId, conversationId: conversation.id, eventType: 'handoff_requested', metadata: { source: 'ai_agent' } })
+  await recordAiExecutionEvent(supabase, {
+    customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
+    agentVersion: session.agent_version, model: BETA_MODEL, outcome: 'handed_off'
+  }).catch(() => {})
+}
+
 async function checkAISession(ctx) {
-  const { data: session } = await supabase.from('ai_agent_sessions').select('*,ai_agents(*)')
+  const { data: session, error } = await supabase.from('ai_agent_sessions').select('*,ai_agents(*)')
     .eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id)
-    .eq('contact_phone', ctx.from).eq('status', 'active').maybeSingle()
+    .eq('contact_phone', ctx.from).eq('conversation_id', ctx.conversation.id).eq('status', 'active').maybeSingle()
+  if (error) throw error
   if (!session) return false
   const agent = session.ai_agents
-  if (!agent || agent.customer_id !== ctx.customerId || agent.whatsapp_number_id !== ctx.number.id) return false
-  const history = [...(session.messages || []), { role: 'user', content: ctx.body }]
-  const reply = await getAIResponse(agent.system_prompt, history, agent)
-  history.push({ role: 'assistant', content: reply })
-  await supabase.from('ai_agent_sessions').update({ messages: history, updated_at: new Date().toISOString() })
-    .eq('id', session.id).eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id)
-  await outgoing(ctx, reply)
-  return true
+  if (!agent || agent.customer_id !== ctx.customerId || agent.whatsapp_number_id !== ctx.number.id ||
+      agent.lifecycle_status !== 'active' || !agent.is_active) return false
+
+  if (sessionExpired(session)) {
+    await supabase.from('ai_agent_sessions').update({
+      status: 'expired', ended_at: new Date().toISOString(), completion_reason: 'idle_timeout'
+    }).eq('id', session.id).eq('customer_id', ctx.customerId).eq('status', 'active')
+    await recordAiExecutionEvent(supabase, {
+      customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
+      agentVersion: session.agent_version, model: BETA_MODEL, outcome: 'blocked', errorCategory: 'session_expired'
+    }).catch(() => {})
+    return false
+  }
+
+  if (isHandoffRequested(agent, ctx.body)) {
+    await transitionAiToHandoff(ctx, session, agent, 'customer_requested_handoff')
+    return true
+  }
+
+  const history = boundedHistory([...(session.messages || []), { role: 'user', content: ctx.body }])
+  const started = Date.now()
+  try {
+    const completion = await getAICompletion(agent.system_prompt, history, agent)
+    if (!completion.text) throw new Error('AI response was empty')
+    const nextHistory = boundedHistory([...history, { role: 'assistant', content: completion.text }])
+    const now = new Date()
+    const { error: updateError } = await supabase.from('ai_agent_sessions').update({
+      messages: nextHistory, updated_at: now.toISOString(), last_activity_at: now.toISOString(),
+      expires_at: new Date(now.getTime() + SESSION_IDLE_MS).toISOString()
+    }).eq('id', session.id).eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).eq('status', 'active')
+    if (updateError) throw updateError
+    await outgoing(ctx, completion.text)
+    await recordAiExecutionEvent(supabase, {
+      customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
+      agentVersion: session.agent_version, model: completion.model, outcome: 'replied',
+      durationMs: Date.now() - started, inputTokens: completion.inputTokens, outputTokens: completion.outputTokens,
+      estimatedCostUsd: estimateCostUsd(completion.model, completion.inputTokens, completion.outputTokens)
+    }).catch(() => {})
+    return true
+  } catch (error) {
+    await recordAiExecutionEvent(supabase, {
+      customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
+      agentVersion: session.agent_version, model: BETA_MODEL, outcome: 'failed',
+      durationMs: Date.now() - started, errorCategory: 'provider_or_runtime_error'
+    }).catch(() => {})
+    throw error
+  }
 }
 
 module.exports = router
