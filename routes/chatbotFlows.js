@@ -12,7 +12,7 @@ function cleanName(value) {
 
 async function workspaceNumber(customerId, id) {
   const { data, error } = await supabase.from('whatsapp_numbers').select('id,customer_id,status')
-    .eq('id', id).eq('customer_id', customerId).maybeSingle()
+    .eq('id', id).eq('customer_id', customerId).eq('status', 'connected').maybeSingle()
   if (error) throw error
   if (!data) throw new Error('Select a connected WhatsApp number from this workspace')
   return data
@@ -39,12 +39,42 @@ async function checkedDefinition(customerId, definition) {
   return validateDefinition(definition, { contentItems: await contentForDefinition(customerId, definition) })
 }
 
+router.get('/setup', async (req, res) => {
+  try {
+    const [{ data: numbers, error: numberError }, { data: discovery, error: discoveryError }] = await Promise.all([
+      supabase.from('whatsapp_numbers').select('id,phone_number,display_name,status').eq('customer_id', req.workspace.customerId).eq('status', 'connected'),
+      supabase.from('workspace_discovery').select('industry,goals').eq('customer_id', req.workspace.customerId).maybeSingle()
+    ])
+    if (numberError || discoveryError) throw numberError || discoveryError
+    res.json({ numbers: numbers || [], discovery: discovery || null })
+  } catch (_) { res.status(500).json({ error: 'Unable to load Chatbot Flow setup' }) }
+})
+
+router.get('/activity', async (req, res) => {
+  const { data, error } = await supabase.from('chatbot_flow_events')
+    .select('id,flow_id,flow_version_id,session_id,conversation_id,event_type,metadata,created_at')
+    .eq('customer_id', req.workspace.customerId).order('created_at', { ascending: false }).limit(100)
+  if (error) return res.status(500).json({ error: 'Unable to load flow activity' })
+  res.json(data || [])
+})
+
 router.get('/', async (req, res) => {
   const { data, error } = await supabase.from('chatbot_flows')
     .select('id,name,customer_id,whatsapp_number_id,is_active,lifecycle_status,current_published_version_id,created_at,updated_at,archived_at')
     .eq('customer_id', req.workspace.customerId).is('archived_at', null).order('created_at', { ascending: false })
   if (error) return res.status(500).json({ error: 'Unable to load chatbot flows' })
   res.json(data || [])
+})
+
+router.get('/:id', async (req, res) => {
+  try {
+    const flow = await flowForWorkspace(req.workspace.customerId, req.params.id)
+    const { data: version, error } = flow.current_published_version_id
+      ? await supabase.from('chatbot_flow_versions').select('id,version,entry_step_key,published_at,definition').eq('id', flow.current_published_version_id).eq('customer_id', req.workspace.customerId).maybeSingle()
+      : { data: null, error: null }
+    if (error) throw error
+    res.json({ ...flow, current_published_version: version || null })
+  } catch (error) { res.status(404).json({ error: error.message || 'Chatbot flow not found' }) }
 })
 
 router.post('/', requireAdmin, async (req, res) => {
@@ -104,6 +134,17 @@ router.post('/:id/pause', requireAdmin, async (req, res) => {
     if (error) throw error
     res.json(data)
   } catch (error) { res.status(400).json({ error: error.message || 'Unable to pause chatbot flow' }) }
+})
+
+router.post('/:id/resume', requireAdmin, async (req, res) => {
+  try {
+    const flow = await flowForWorkspace(req.workspace.customerId, req.params.id)
+    if (flow.lifecycle_status === 'archived' || !flow.current_published_version_id) throw new Error('Only a previously published flow can be resumed')
+    const { data, error } = await supabase.from('chatbot_flows').update({ lifecycle_status: 'published', is_active: true, updated_at: new Date().toISOString() })
+      .eq('id', flow.id).eq('customer_id', req.workspace.customerId).select().single()
+    if (error) throw error
+    res.json(data)
+  } catch (error) { res.status(400).json({ error: error.message || 'Unable to resume chatbot flow' }) }
 })
 
 router.post('/:id/archive', requireAdmin, async (req, res) => {
