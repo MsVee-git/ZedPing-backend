@@ -4,6 +4,7 @@ const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
 const { BETA_MODEL, boundedHistory, estimateCostUsd } = require('../lib/aiRuntime')
 const { getAICompletion } = require('../lib/openai')
+const { normalizePhone } = require('../lib/contactImport')
 
 const MAX_KNOWLEDGE_ITEMS = 5
 const MAX_KNOWLEDGE_ITEM_CHARS = 3000
@@ -195,4 +196,82 @@ router.post('/:id/archive',requireAdmin,async(req,res)=>{
     res.json({agent:safeAgent(data)})
   } catch(error){res.status(400).json({error:error.message||'Unable to archive AI Agent'})}
 })
+async function liveReadiness(customerId, agent) {
+  if (!agent.name?.trim()) throw new Error('Set a customer-facing assistant name before activation')
+  if (agent.lifecycle_status !== 'draft' && agent.lifecycle_status !== 'paused') throw new Error('Only draft or paused AI Agents can be activated')
+  await workspaceNumber(customerId, agent.whatsapp_number_id)
+  const knowledge = await knowledgeForAgent(customerId, agent.id, true)
+  const links = await selectedKnowledge(customerId, knowledge.map(item => item.id))
+  if (links.length !== knowledge.length) throw new Error('Approved knowledge is no longer eligible')
+  const handoff = agent.zoe_configuration?.handoff
+  if (!handoff || typeof handoff !== 'object') throw new Error('Configure handoff behaviour before activation')
+  const { data: conflicts, error: conflictError } = await supabase.from('ai_agents').select('id')
+    .eq('customer_id', customerId).eq('whatsapp_number_id', agent.whatsapp_number_id)
+    .eq('lifecycle_status', 'active').eq('is_active', true).neq('id', agent.id)
+  if (conflictError) throw conflictError
+  if ((conflicts || []).length) throw new Error('Another AI Agent is already active on this WhatsApp number')
+  const { data: tests, error: testError } = await supabase.from('ai_agent_test_contacts').select('id')
+    .eq('customer_id', customerId).eq('agent_id', agent.id)
+  if (testError) throw testError
+  if (!(tests || []).length) throw new Error('Add at least one approved test contact before controlled activation')
+  return knowledge
+}
+
+router.post('/:id/test-contacts', requireAdmin, async (req,res) => {
+  try {
+    const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
+    if (agent.lifecycle_status === 'active') throw new Error('Pause the active AI Agent before changing its test contacts')
+    const phone = normalizePhone(cleanText(req.body?.phone, 'Test contact phone', 40, true))
+    const { data, error } = await supabase.from('ai_agent_test_contacts').upsert({
+      customer_id:req.workspace.customerId, agent_id:agent.id, phone_e164:phone, created_by:req.workspace.userId
+    }, {onConflict:'agent_id,phone_e164'}).select().single()
+    if (error) throw error
+    res.status(201).json({ test_contact:{id:data.id, phone_e164:data.phone_e164} })
+  } catch(error) { res.status(error?.code === '23505' ? 409 : 400).json({error:error.message || 'Unable to add test contact'}) }
+})
+
+router.get('/:id/readiness', requireAdmin, async (req,res) => {
+  try {
+    const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
+    const knowledge = await liveReadiness(req.workspace.customerId, agent)
+    res.json({ready:true, assistant_name:agent.name, whatsapp_number_id:agent.whatsapp_number_id, knowledge_sources:knowledge.map(item=>item.name), handoff:agent.zoe_configuration?.handoff || {}})
+  } catch(error) { res.status(400).json({ready:false,error:error.message || 'This AI Agent is not ready'}) }
+})
+
+router.post('/:id/activate', requireAdmin, async (req,res) => {
+  try {
+    const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
+    const knowledge = await liveReadiness(req.workspace.customerId, agent)
+    const version = Number(agent.configuration_version || 1) + 1
+    const snapshotConfig = { name:agent.name, template_key:agent.zoe_template_key, configuration:agent.zoe_configuration || {}, whatsapp_number_id:agent.whatsapp_number_id }
+    const knowledgeSnapshot = knowledge.map(item => ({ id:item.id, name:item.name, text_content:String(item.text_content || '').slice(0,3000) }))
+    const { data, error } = await supabase.from('ai_agents').update({
+      lifecycle_status:'active', is_active:true, configuration_version:version, archived_at:null, archive_reason:null
+    }).eq('id',agent.id).eq('customer_id',req.workspace.customerId).select().single()
+    if (error) throw error
+    const { error: versionError } = await supabase.from('ai_agent_configuration_versions').insert({
+      customer_id:req.workspace.customerId, agent_id:agent.id, version, configuration:snapshotConfig,
+      knowledge_snapshot:knowledgeSnapshot, activated_at:new Date().toISOString(), created_by:req.workspace.userId
+    })
+    if (versionError) throw versionError
+    res.json({agent:safeAgent(data,knowledge.map(({text_content,...safe})=>safe)), status:'active'})
+  } catch(error) { res.status(error?.code === '23505' ? 409 : 400).json({error:error.message || 'Unable to activate AI Agent'}) }
+})
+
+router.post('/:id/pause', requireAdmin, async (req,res) => {
+  try {
+    const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
+    if (agent.lifecycle_status !== 'active') throw new Error('Only an active AI Agent can be paused')
+    const now = new Date().toISOString()
+    const { data, error } = await supabase.from('ai_agents').update({lifecycle_status:'paused',is_active:false})
+      .eq('id',agent.id).eq('customer_id',req.workspace.customerId).select().single()
+    if (error) throw error
+    const { error: sessionsError } = await supabase.from('ai_agent_sessions').update({
+      status:'cancelled',ended_at:now,last_activity_at:now,completion_reason:'agent_paused'
+    }).eq('customer_id',req.workspace.customerId).eq('agent_id',agent.id).eq('status','active')
+    if (sessionsError) throw sessionsError
+    res.json({agent:safeAgent(data), status:'paused'})
+  } catch(error) { res.status(400).json({error:error.message || 'Unable to pause AI Agent'}) }
+})
+
 module.exports=router
