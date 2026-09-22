@@ -37,7 +37,7 @@ function safeAgent(agent, knowledge = []) {
   return {
     id:agent.id, name:agent.name, agent_type:agent.agent_type, lifecycle_status:agent.lifecycle_status,
     whatsapp_number_id:agent.whatsapp_number_id, configuration_version:agent.configuration_version,
-    created_at:agent.created_at, archived_at:agent.archived_at, template_key:agent.zoe_template_key,
+    created_at:agent.created_at, archived_at:agent.archived_at, template_key:agent.zoe_template_key, deployment_mode:agent.deployment_mode || 'test',
     configuration:agent.zoe_configuration || {}, knowledge
   }
 }
@@ -289,13 +289,43 @@ router.post('/:id/activate', requireAdmin, async (req,res) => {
     })
     if (versionError) throw versionError
     const { data, error } = await supabase.from('ai_agents').update({
-      lifecycle_status:'active', is_active:true, configuration_version:version, archived_at:null, archive_reason:null
+      lifecycle_status:'active', is_active:true, deployment_mode:'test', configuration_version:version, archived_at:null, archive_reason:null
     }).eq('id',agent.id).eq('customer_id',req.workspace.customerId)
       .eq('lifecycle_status',agent.lifecycle_status).eq('configuration_version',agent.configuration_version).select().maybeSingle()
     if (error) throw error
     if (!data) throw new Error('AI Agent changed before activation; review it again') 
     res.json({agent:safeAgent(data,knowledge.map(({text_content,...safe})=>safe)), status:'active'})
   } catch(error) { res.status(error?.code === '23505' ? 409 : 400).json({error:error.message || 'Unable to activate AI Agent'}) }
+})
+
+router.post('/:id/go-live', requireAdmin, async (req,res) => {
+  try {
+    const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
+    if (agent.lifecycle_status !== 'active' || !agent.is_active) throw new Error('Only an active Test Mode agent can go live')
+    if (String(agent.deployment_mode || 'test') === 'live') return res.json({agent:safeAgent(agent), status:'live'})
+    await liveReadiness(req.workspace.customerId, agent)
+    const { data, error } = await supabase.from('ai_agents').update({ deployment_mode:'live' })
+      .eq('id',agent.id).eq('customer_id',req.workspace.customerId).eq('lifecycle_status','active').eq('deployment_mode','test').select().maybeSingle()
+    if (error) throw error
+    if (!data) throw new Error('AI Agent changed before going live; review it again')
+    res.json({agent:safeAgent(data), status:'live'})
+  } catch(error) { res.status(400).json({error:error.message || 'Unable to put this AI Agent live'}) }
+})
+
+router.post('/:id/test-mode', requireAdmin, async (req,res) => {
+  try {
+    const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
+    if (agent.lifecycle_status !== 'active' || !agent.is_active) throw new Error('Only an active Live agent can return to Test Mode')
+    if (String(agent.deployment_mode || 'test') === 'test') return res.json({agent:safeAgent(agent), status:'test'})
+    const now = new Date().toISOString()
+    const { data, error } = await supabase.from('ai_agents').update({ deployment_mode:'test' })
+      .eq('id',agent.id).eq('customer_id',req.workspace.customerId).eq('lifecycle_status','active').eq('deployment_mode','live').select().maybeSingle()
+    if (error) throw error
+    if (!data) throw new Error('AI Agent changed before returning to Test Mode')
+    await supabase.from('ai_agent_sessions').update({status:'cancelled',ended_at:now,last_activity_at:now,completion_reason:'agent_returned_to_test_mode'})
+      .eq('customer_id',req.workspace.customerId).eq('agent_id',agent.id).eq('status','active')
+    res.json({agent:safeAgent(data), status:'test'})
+  } catch(error) { res.status(400).json({error:error.message || 'Unable to return this AI Agent to Test Mode'}) }
 })
 
 router.post('/:id/pause', requireAdmin, async (req,res) => {
