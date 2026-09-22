@@ -116,6 +116,25 @@ async function replaceKnowledge(customerId, agentId, items) {
   const { error } = await supabase.from('ai_agent_knowledge_items').insert(items.map(item => ({ customer_id:customerId, agent_id:agentId, content_library_item_id:item.id })))
   if (error) throw error
 }
+function assertActivatedSnapshot(agent, version) {
+  const config = version?.configuration
+  const knowledge = version?.knowledge_snapshot
+  if (!config || typeof config !== 'object' || !String(config.name || '').trim()) throw new Error('The activated AI configuration is invalid')
+  if (config.whatsapp_number_id !== agent.whatsapp_number_id) throw new Error('The activated AI configuration is not bound to this WhatsApp number')
+  if (!Array.isArray(knowledge) || knowledge.some(item => !item || typeof item.name !== 'string' || typeof item.text_content !== 'string')) throw new Error('The activated knowledge snapshot is invalid')
+  const handoff = config.configuration?.handoff
+  if (!handoff || typeof handoff !== 'object') throw new Error('The activated handoff configuration is invalid')
+}
+async function resumeReadiness(customerId, agent, version) {
+  await workspaceNumber(customerId, agent.whatsapp_number_id)
+  assertActivatedSnapshot(agent, version)
+  const { data, error } = await supabase.from('ai_agents').select('id').eq('customer_id',customerId)
+    .eq('whatsapp_number_id',agent.whatsapp_number_id).eq('lifecycle_status','active').eq('is_active',true)
+    .is('legacy_contained_at',null).neq('id',agent.id).limit(1)
+  if (error) throw error
+  if (data?.length) throw new Error('Another active AI Agent already uses this WhatsApp number')
+}
+
 async function snapshot(customerId, agent, userId) {
   const configuration = { name:agent.name, template_key:agent.zoe_template_key, configuration:agent.zoe_configuration, whatsapp_number_id:agent.whatsapp_number_id }
   const { error } = await supabase.from('ai_agent_configuration_versions').upsert({ customer_id:customerId, agent_id:agent.id, version:agent.configuration_version, configuration, created_by:userId }, { onConflict:'agent_id,version' })
@@ -309,7 +328,7 @@ router.post('/:id/resume', requireAdmin, async (req,res) => {
       .eq('agent_id',agent.id).eq('version',agent.configuration_version).not('activated_at','is',null).maybeSingle()
     if (versionError) throw versionError
     if (!version) throw new Error('The activated AI configuration is unavailable')
-    await liveReadiness(req.workspace.customerId, agent)
+    await resumeReadiness(req.workspace.customerId, agent, version)
     const { data, error } = await supabase.from('ai_agents').update({lifecycle_status:'active',is_active:true})
       .eq('id',agent.id).eq('customer_id',req.workspace.customerId).eq('lifecycle_status','paused')
       .eq('configuration_version',agent.configuration_version).select().maybeSingle()
