@@ -74,7 +74,7 @@ router.post('/confirm', requireAdmin, async (req, res) => {
       p_filename: safeFilename(req.body?.filename),
       p_source_label: String(req.body?.source_label || '').trim().slice(0, 120),
       p_total_rows: plan.summary.total_rows,
-      p_skipped_count: plan.summary.invalid_rows,
+      p_skipped_count: plan.summary.skipped_rows,
       p_entries: plan.entries
     })
     if (error) throw error
@@ -86,7 +86,7 @@ router.post('/confirm', requireAdmin, async (req, res) => {
       skipped_count: Number(result?.skipped_count || 0),
       group_members_added: Number(result?.group_members_added || 0),
       summary: plan.summary,
-      skipped_rows: plan.preview.filter((row) => row.status === 'skipped')
+      skipped_rows: plan.preview.filter((row) => ['invalid', 'uninterpretable', 'duplicate'].includes(row.status))
     })
   } catch (error) {
     return safeError(res, error)

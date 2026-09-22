@@ -11,12 +11,19 @@ const base = (rows, existingContacts = []) => buildImportPlan({
 })
 
 test('accepts a phone-only CSV row and Zambia local forms', () => {
-  for (const phone of ['0977123456', '977123456', '260977123456', '+260977123456']) {
-    assert.equal(normalizePhone(phone), '+260977123456')
+  for (const phone of ['0978748066', '978748066', '260978748066', '+260978748066', '097 874 8066', '0978-748-066', '+260 978 748 066']) {
+    assert.equal(normalizePhone(phone), '+260978748066')
   }
   const plan = buildImportPlan({ headers: ['phone'], rows: [['0977123456']], mapping: { phone: 0 }, existingContacts: [] })
   assert.equal(plan.summary.new_contacts, 1)
   assert.equal(plan.entries[0].name, '')
+})
+
+test('accepts safely represented numeric spreadsheet cells but rejects scientific or precision-damaged values', () => {
+  assert.equal(normalizePhone(978748066), '+260978748066')
+  assert.equal(normalizePhone(260978748066), '+260978748066')
+  assert.throws(() => normalizePhone('2.60978748066E+11'), /safely interpret/)
+  assert.throws(() => normalizePhone(Number.MAX_SAFE_INTEGER + 1), /safely interpret/)
 })
 
 test('preserves valid international E.164 and accepts blank names', () => {
@@ -25,11 +32,21 @@ test('preserves valid international E.164 and accepts blank names', () => {
   assert.equal(plan.entries[0].name, '')
 })
 
-test('rejects invalid phones, duplicate file rows and invalid email without producing entries', () => {
+test('rejects invalid phones and invalid email without discarding a later valid correction', () => {
   const plan = base([['not-a-phone', '', ''], ['0977123456', '', 'bad-email'], ['0977123456', '', '']])
-  assert.equal(plan.entries.length, 0)
-  assert.equal(plan.summary.invalid_rows, 3)
-  assert.equal(plan.summary.duplicate_rows, 1)
+  assert.equal(plan.entries.length, 1)
+  assert.equal(plan.summary.invalid_rows, 2)
+  assert.equal(plan.summary.duplicate_rows, 0)
+  assert.equal(plan.summary.skipped_rows, 2)
+  assert.equal(plan.preview[2].status, 'ready')
+})
+
+test('review entries retain original and canonical values with distinct ready and existing states', () => {
+  const plan = base([['0978748066', '', ''], ['978748066', '', '']], [{ id: 'existing', phone_e164: '+260978748066' }])
+  assert.equal(plan.preview[0].original_phone, '0978748066')
+  assert.equal(plan.preview[0].zedping_number, '+260978748066')
+  assert.equal(plan.preview[0].status, 'existing')
+  assert.equal(plan.preview[1].status, 'duplicate')
 })
 
 test('recognises same-workspace existing contacts and never overwrites non-empty data in plan', () => {
