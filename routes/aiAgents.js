@@ -298,6 +298,27 @@ router.post('/:id/activate', requireAdmin, async (req,res) => {
   } catch(error) { res.status(error?.code === '23505' ? 409 : 400).json({error:error.message || 'Unable to activate AI Agent'}) }
 })
 
+router.post('/:id/resume', requireAdmin, async (req,res) => {
+  try {
+    const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
+    if (agent.lifecycle_status === 'active' && agent.is_active) return res.json({agent:safeAgent(agent), status:agent.deployment_mode || 'test'})
+    if (agent.lifecycle_status !== 'paused') throw new Error('Only a paused AI Agent can be resumed')
+    const number = await workspaceNumber(req.workspace.customerId, agent.whatsapp_number_id)
+    const { data: version, error: versionError } = await supabase.from('ai_agent_configuration_versions')
+      .select('version,configuration,knowledge_snapshot,activated_at').eq('customer_id',req.workspace.customerId)
+      .eq('agent_id',agent.id).eq('version',agent.configuration_version).not('activated_at','is',null).maybeSingle()
+    if (versionError) throw versionError
+    if (!version) throw new Error('The activated AI configuration is unavailable')
+    await liveReadiness(req.workspace.customerId, agent)
+    const { data, error } = await supabase.from('ai_agents').update({lifecycle_status:'active',is_active:true})
+      .eq('id',agent.id).eq('customer_id',req.workspace.customerId).eq('lifecycle_status','paused')
+      .eq('configuration_version',agent.configuration_version).select().maybeSingle()
+    if (error) throw error
+    if (!data) throw new Error('AI Agent changed before resume; review it again')
+    res.json({agent:safeAgent(data),status:data.deployment_mode || 'test'})
+  } catch(error) { res.status(400).json({error:error.message || 'Unable to resume this AI Agent'}) }
+})
+
 router.post('/:id/go-live', requireAdmin, async (req,res) => {
   try {
     const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
