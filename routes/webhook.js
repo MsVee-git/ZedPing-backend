@@ -16,6 +16,7 @@ const { selectSoleActiveAgent } = require('../lib/aiAgentSelection')
 const { startFlow, continueFlow } = require('../lib/chatbotExecution')
 const { normalizePhone } = require('../lib/contactImport')
 const { buildLiveSystem, configuredHandoff, handoffReply, isCustomerSafeReply, hasNaturalTeamTransition, lacksLexicalSupport, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
+const { mayExecute } = require('../lib/aiDeploymentMode')
 
 router.get('/', (req, res) => {
   const received = Buffer.from(String(req.query['hub.verify_token'] || ''))
@@ -252,7 +253,7 @@ async function startLiveZoeSession(ctx) {
   if (error) throw error
   const agent = selectSoleActiveAgent(agents)
   if (!agent || !ctx.contact?.id || !ctx.conversation?.id) return false
-  if (String(agent.deployment_mode || 'test') !== 'live' && !(await isApprovedTestContact(ctx, agent.id))) return false
+  if (!mayExecute(agent, await isApprovedTestContact(ctx, agent.id))) return false
   const version = await loadLiveVersion(ctx, agent)
   if (!version) return false
   const now = new Date()
@@ -366,7 +367,7 @@ async function checkAISession(ctx) {
   if (!session) return false
   const agent = session.ai_agents
   if (!agent || agent.customer_id !== ctx.customerId || agent.whatsapp_number_id !== ctx.number.id ||
-      agent.lifecycle_status !== 'active' || !agent.is_active || (String(agent.deployment_mode || 'test') !== 'live' && !(await isApprovedTestContact(ctx, agent.id)))) {
+      !mayExecute(agent, await isApprovedTestContact(ctx, agent.id))) {
     await supabase.from('ai_agent_sessions').update({
       status:'cancelled', ended_at:new Date().toISOString(), completion_reason:'agent_not_live_or_contact_not_allowed'
     }).eq('id',session.id).eq('customer_id',ctx.customerId).eq('status','active')

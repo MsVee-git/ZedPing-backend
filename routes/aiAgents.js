@@ -7,6 +7,7 @@ const { getAICompletion } = require('../lib/openai')
 const { normalizePhone } = require('../lib/contactImport')
 const { configuredHandoff, lacksLexicalSupport, handoffReply } = require('../lib/zoeGrounding')
 const { activeTextKnowledge, knowledgeSnapshot } = require('../lib/aiAgentKnowledge')
+const { deploymentMode, isActiveAgent, mayGoLive, mayReturnToTest } = require('../lib/aiDeploymentMode')
 
 const MAX_KNOWLEDGE_ITEMS = 5
 const MAX_KNOWLEDGE_ITEM_CHARS = 3000
@@ -121,11 +122,11 @@ function assertActivatedSnapshot(agent, version) {
   const knowledge = version?.knowledge_snapshot
   if (!config || typeof config !== 'object' || !String(config.name || '').trim()) throw new Error('The activated AI configuration is invalid')
   if (config.whatsapp_number_id !== agent.whatsapp_number_id) throw new Error('The activated AI configuration is not bound to this WhatsApp number')
-  if (!Array.isArray(knowledge) || knowledge.some(item => !item || typeof item.name !== 'string' || typeof item.text_content !== 'string')) throw new Error('The activated knowledge snapshot is invalid')
+  if (!Array.isArray(knowledge) || !knowledge.length || knowledge.some(item => !item || typeof item.name !== 'string' || typeof item.text_content !== 'string')) throw new Error('The activated knowledge snapshot is invalid')
   const handoff = config.configuration?.handoff
   if (!handoff || typeof handoff !== 'object') throw new Error('The activated handoff configuration is invalid')
 }
-async function resumeReadiness(customerId, agent, version) {
+async function activatedVersionReadiness(customerId, agent, version) {
   await workspaceNumber(customerId, agent.whatsapp_number_id)
   assertActivatedSnapshot(agent, version)
   const { data, error } = await supabase.from('ai_agents').select('id').eq('customer_id',customerId)
@@ -320,30 +321,34 @@ router.post('/:id/activate', requireAdmin, async (req,res) => {
 router.post('/:id/resume', requireAdmin, async (req,res) => {
   try {
     const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
-    if (agent.lifecycle_status === 'active' && agent.is_active) return res.json({agent:safeAgent(agent), status:agent.deployment_mode || 'test'})
+    if (isActiveAgent(agent)) return res.json({agent:safeAgent(agent), status:deploymentMode(agent)})
     if (agent.lifecycle_status !== 'paused') throw new Error('Only a paused AI Agent can be resumed')
-    const number = await workspaceNumber(req.workspace.customerId, agent.whatsapp_number_id)
     const { data: version, error: versionError } = await supabase.from('ai_agent_configuration_versions')
       .select('version,configuration,knowledge_snapshot,activated_at').eq('customer_id',req.workspace.customerId)
       .eq('agent_id',agent.id).eq('version',agent.configuration_version).not('activated_at','is',null).maybeSingle()
     if (versionError) throw versionError
     if (!version) throw new Error('The activated AI configuration is unavailable')
-    await resumeReadiness(req.workspace.customerId, agent, version)
+    await activatedVersionReadiness(req.workspace.customerId, agent, version)
     const { data, error } = await supabase.from('ai_agents').update({lifecycle_status:'active',is_active:true})
       .eq('id',agent.id).eq('customer_id',req.workspace.customerId).eq('lifecycle_status','paused')
       .eq('configuration_version',agent.configuration_version).select().maybeSingle()
     if (error) throw error
     if (!data) throw new Error('AI Agent changed before resume; review it again')
-    res.json({agent:safeAgent(data),status:data.deployment_mode || 'test'})
+    res.json({agent:safeAgent(data),status:deploymentMode(data)})
   } catch(error) { res.status(400).json({error:error.message || 'Unable to resume this AI Agent'}) }
 })
 
 router.post('/:id/go-live', requireAdmin, async (req,res) => {
   try {
     const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
-    if (agent.lifecycle_status !== 'active' || !agent.is_active) throw new Error('Only an active Test Mode agent can go live')
-    if (String(agent.deployment_mode || 'test') === 'live') return res.json({agent:safeAgent(agent), status:'live'})
-    await liveReadiness(req.workspace.customerId, agent)
+    if (isActiveAgent(agent) && deploymentMode(agent) === 'live') return res.json({agent:safeAgent(agent), status:'live'})
+    if (!mayGoLive(agent)) throw new Error('Only an active Test Mode agent can go live')
+    const { data: version, error: versionError } = await supabase.from('ai_agent_configuration_versions')
+      .select('version,configuration,knowledge_snapshot,activated_at').eq('customer_id',req.workspace.customerId)
+      .eq('agent_id',agent.id).eq('version',agent.configuration_version).not('activated_at','is',null).maybeSingle()
+    if (versionError) throw versionError
+    if (!version) throw new Error('The activated AI configuration is unavailable')
+    await activatedVersionReadiness(req.workspace.customerId, agent, version)
     const { data, error } = await supabase.from('ai_agents').update({ deployment_mode:'live' })
       .eq('id',agent.id).eq('customer_id',req.workspace.customerId).eq('lifecycle_status','active').eq('deployment_mode','test').select().maybeSingle()
     if (error) throw error
@@ -355,8 +360,8 @@ router.post('/:id/go-live', requireAdmin, async (req,res) => {
 router.post('/:id/test-mode', requireAdmin, async (req,res) => {
   try {
     const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
-    if (agent.lifecycle_status !== 'active' || !agent.is_active) throw new Error('Only an active Live agent can return to Test Mode')
-    if (String(agent.deployment_mode || 'test') === 'test') return res.json({agent:safeAgent(agent), status:'test'})
+    if (isActiveAgent(agent) && deploymentMode(agent) === 'test') return res.json({agent:safeAgent(agent), status:'test'})
+    if (!mayReturnToTest(agent)) throw new Error('Only an active Live agent can return to Test Mode')
     const now = new Date().toISOString()
     const { data, error } = await supabase.from('ai_agents').update({ deployment_mode:'test' })
       .eq('id',agent.id).eq('customer_id',req.workspace.customerId).eq('lifecycle_status','active').eq('deployment_mode','live').select().maybeSingle()
