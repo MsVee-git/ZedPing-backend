@@ -5,6 +5,7 @@ const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
 const { createMetaTemplateClient, MetaTemplateError } = require('../lib/metaTemplates')
 const { CONTENT_BUCKET, TYPES, cleanText, safeUrl, assertFile, storagePath, itemForClient, editablePatch } = require('../lib/contentLibrary')
+const { cleanReviewText, cleanReviewNotes, cleanDate, publicIngestion, extractForReview } = require('../lib/contentImageKnowledge')
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } })
 function parseUpload(req, res, next) {
@@ -45,6 +46,36 @@ async function ownedItem(customerId, id) {
   if (error) throw error
   if (!data) { const err = new Error('Content item not found'); err.status = 404; throw err }
   return data
+}
+
+async function ownedIngestion(customerId, id) {
+  const { data, error } = await supabase.from('content_library_ingestions').select('*').eq('id', id).eq('customer_id', customerId).maybeSingle()
+  if (error) throw error
+  if (!data) { const err = new Error('Knowledge extraction not found'); err.status = 404; throw err }
+  return data
+}
+async function latestRevision(customerId, ingestionId) {
+  const { data, error } = await supabase.from('content_library_knowledge_revisions').select('*').eq('customer_id', customerId).eq('ingestion_id', ingestionId).order('approved_at', { ascending:false }).limit(1).maybeSingle()
+  if (error) throw error
+  return data || null
+}
+async function startExtraction(req, item) {
+  if (item.archived_at || item.content_type !== 'IMAGE') throw new Error('Only an active Image item can be analyzed for Zoe')
+  const { data: pending, error } = await supabase.from('content_library_ingestions').insert({
+    customer_id:req.workspace.customerId, source_content_item_id:item.id, source_kind:'IMAGE', status:'pending', created_by:req.workspace.userId
+  }).select().single()
+  if (error) throw error
+  const { data: run, error: processingError } = await supabase.from('content_library_ingestions').update({ status:'processing', updated_at:new Date().toISOString() }).eq('id',pending.id).eq('customer_id',req.workspace.customerId).select().single()
+  if (processingError) throw processingError
+  try {
+    const extracted = await extractForReview(item)
+    const { data, error:updateError } = await supabase.from('content_library_ingestions').update({ ...extracted, status:'ready_for_review', updated_at:new Date().toISOString() }).eq('id',run.id).eq('customer_id',req.workspace.customerId).select().single()
+    if (updateError) throw updateError
+    return publicIngestion(data)
+  } catch (error) {
+    await supabase.from('content_library_ingestions').update({ status:'failed', error_category:'extraction_unavailable', updated_at:new Date().toISOString() }).eq('id',run.id).eq('customer_id',req.workspace.customerId)
+    throw new Error('We could not analyze this image. Please try Extract Again later.')
+  }
 }
 
 router.get('/', async (req, res) => {
@@ -109,6 +140,59 @@ router.patch('/:id', requireAdmin, async (req, res) => {
     const safe = new Set(['Archived content cannot be edited', 'Invalid content update', 'Choose something to update', 'Name is required', 'Name is invalid', 'Name is too long', 'Description is invalid', 'Description is too long', 'Content is required', 'Content is invalid', 'Content is too long', 'Link URL is required', 'Link URL is invalid', 'Link URL is too long', 'Enter a valid http or https URL', 'Only http and https links are allowed', 'Text content cannot include a link update', 'Link content cannot include a text update', 'This content type cannot be edited that way'])
     res.status(error.status || 400).json({ error: safe.has(error.message) ? error.message : 'Unable to update content' })
   }
+})
+
+router.get('/:id/knowledge-ingestions', async (req,res) => {
+  try {
+    const item = await ownedItem(req.workspace.customerId, req.params.id)
+    if (item.content_type !== 'IMAGE') return res.status(400).json({ error:'This is not an Image item' })
+    const { data, error } = await supabase.from('content_library_ingestions').select('*').eq('customer_id',req.workspace.customerId).eq('source_content_item_id',item.id).order('created_at',{ascending:false}).limit(12)
+    if (error) throw error
+    const revisions = await Promise.all((data || []).map(run => latestRevision(req.workspace.customerId, run.id)))
+    res.json({ ingestions:(data || []).map((run,index) => publicIngestion(run,revisions[index])) })
+  } catch(error) { res.status(error.status || 500).json({error:error.message || 'Unable to load image knowledge'}) }
+})
+
+router.post('/:id/extract-knowledge', requireAdmin, async (req,res) => {
+  try { res.status(201).json({ ingestion: await startExtraction(req, await ownedItem(req.workspace.customerId, req.params.id)) }) }
+  catch(error) { res.status(error.status || 400).json({ error:error.message || 'Unable to analyze this image' }) }
+})
+
+router.patch('/knowledge-ingestions/:ingestionId/review', requireAdmin, async (req,res) => {
+  try {
+    const run = await ownedIngestion(req.workspace.customerId, req.params.ingestionId)
+    if (run.status !== 'ready_for_review') throw new Error('Only information ready for review can be edited')
+    const { data,error } = await supabase.from('content_library_ingestions').update({
+      extracted_text:cleanReviewText(req.body?.extracted_text), review_notes:cleanReviewNotes(req.body?.review_notes), updated_at:new Date().toISOString()
+    }).eq('id',run.id).eq('customer_id',req.workspace.customerId).select().single()
+    if(error) throw error
+    res.json({ingestion:publicIngestion(data)})
+  } catch(error) { res.status(error.status || 400).json({error:error.message || 'Unable to save the reviewed information'}) }
+})
+
+router.post('/knowledge-ingestions/:ingestionId/approve', requireAdmin, async (req,res) => {
+  try {
+    const run = await ownedIngestion(req.workspace.customerId, req.params.ingestionId)
+    if (run.status !== 'ready_for_review') throw new Error('This extraction is not ready for approval')
+    const text = cleanReviewText(req.body?.extracted_text ?? run.extracted_text)
+    const validFrom=cleanDate(req.body?.valid_from,'Valid from'), validUntil=cleanDate(req.body?.valid_until,'Valid until')
+    if(validFrom && validUntil && validFrom > validUntil) throw new Error('Valid until cannot be before valid from')
+    const { data,error } = await supabase.rpc('approve_content_image_knowledge', { p_customer_id:req.workspace.customerId, p_ingestion_id:run.id, p_text_content:text, p_valid_from:validFrom, p_valid_until:validUntil, p_actor_user_id:req.workspace.userId })
+    if(error) throw error
+    const approved=Array.isArray(data)?data[0]:data
+    const refreshed=await ownedIngestion(req.workspace.customerId,run.id)
+    res.json({ingestion:publicIngestion(refreshed,approved)})
+  } catch(error) { res.status(error.status || 400).json({error:error.message || 'Unable to approve this information for Zoe'}) }
+})
+
+router.post('/knowledge-ingestions/:ingestionId/reject', requireAdmin, async (req,res) => {
+  try {
+    const run=await ownedIngestion(req.workspace.customerId,req.params.ingestionId)
+    if(!['ready_for_review','failed'].includes(run.status)) throw new Error('This extraction cannot be rejected')
+    const {data,error}=await supabase.from('content_library_ingestions').update({status:'rejected',reviewed_by:req.workspace.userId,reviewed_at:new Date().toISOString(),updated_at:new Date().toISOString()}).eq('id',run.id).eq('customer_id',req.workspace.customerId).select().single()
+    if(error) throw error
+    res.json({ingestion:publicIngestion(data)})
+  } catch(error){res.status(error.status||400).json({error:error.message||'Unable to reject this information'})}
 })
 
 router.post('/:id/archive', requireAdmin, async (req, res) => {

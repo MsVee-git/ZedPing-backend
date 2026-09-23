@@ -6,7 +6,7 @@ const { BETA_MODEL, boundedHistory, estimateCostUsd } = require('../lib/aiRuntim
 const { getAICompletion } = require('../lib/openai')
 const { normalizePhone } = require('../lib/contactImport')
 const { configuredHandoff, lacksLexicalSupport, handoffReply } = require('../lib/zoeGrounding')
-const { activeTextKnowledge, knowledgeSnapshot } = require('../lib/aiAgentKnowledge')
+const { knowledgeSnapshot, resolveEligibleKnowledge } = require('../lib/aiAgentKnowledge')
 const { deploymentMode, isActiveAgent, mayGoLive, mayReturnToTest } = require('../lib/aiDeploymentMode')
 
 const MAX_KNOWLEDGE_ITEMS = 5
@@ -58,13 +58,11 @@ async function agentForWorkspace(customerId, id) {
 }
 async function selectedKnowledge(customerId, ids) {
   const unique = [...new Set(Array.isArray(ids) ? ids.filter(id => typeof id === 'string') : [])]
-  if (unique.length > MAX_KNOWLEDGE_ITEMS) throw new Error('Select no more than ' + MAX_KNOWLEDGE_ITEMS + ' Text items')
+  if (unique.length > MAX_KNOWLEDGE_ITEMS) throw new Error('Select no more than ' + MAX_KNOWLEDGE_ITEMS + ' approved knowledge items')
   if (!unique.length) return []
-  const { data, error } = await supabase.from('content_library_items').select('id,name,text_content,updated_at')
-    .eq('customer_id', customerId).eq('content_type', 'TEXT').is('archived_at', null).in('id', unique)
-  if (error) throw error
-  if ((data || []).length !== unique.length) throw new Error('Every knowledge item must be an active Text item from this workspace')
-  return unique.map(id => data.find(item => item.id === id))
+  const items=await resolveEligibleKnowledge(supabase,customerId,unique)
+  if(items.length !== unique.length) throw new Error('Every knowledge item must be active approved knowledge from this workspace')
+  return items
 }
 function readConfig(body) {
   const template = templateFor(cleanText(body?.template_key, 'Template', 80, true))
@@ -101,14 +99,9 @@ function wouldHandoff(config, messages, hasKnowledge) {
   return person || commercial || phrase || (handoff.unknown !== false && !hasKnowledge)
 }
 async function knowledgeForAgent(customerId, agentId, withText = false) {
-  const fields = withText
-    ? 'content_library_item_id,content_library_items(id,name,text_content,content_type,archived_at,updated_at)'
-    : 'content_library_item_id,content_library_items(id,name,content_type,archived_at)'
-  const { data, error } = await supabase.from('ai_agent_knowledge_items').select(fields).eq('customer_id', customerId).eq('agent_id', agentId).order('created_at')
+  const { data, error } = await supabase.from('ai_agent_knowledge_items').select('content_library_item_id').eq('customer_id', customerId).eq('agent_id', agentId).order('created_at')
   if (error) throw error
-  // Draft configuration may never carry a stale archived/non-Text item back into
-  // a later save. Historical activated snapshots remain separate and immutable.
-  return activeTextKnowledge(data)
+  return resolveEligibleKnowledge(supabase,customerId,(data || []).map(row=>row.content_library_item_id))
 }
 async function replaceKnowledge(customerId, agentId, items) {
   const { error: removeError } = await supabase.from('ai_agent_knowledge_items').delete().eq('customer_id', customerId).eq('agent_id', agentId)
@@ -143,10 +136,12 @@ async function snapshot(customerId, agent, userId) {
 }
 router.get('/library', (req,res) => res.json({ templates:TEMPLATES }))
 router.get('/knowledge-items', async (req,res) => {
-  const { data, error } = await supabase.from('content_library_items').select('id,name,description,updated_at')
-    .eq('customer_id', req.workspace.customerId).eq('content_type','TEXT').is('archived_at', null).order('updated_at',{ascending:false})
-  if (error) return res.status(500).json({error:'Unable to load approved Text knowledge'})
-  res.json({ items:data || [], limits:{max_items:MAX_KNOWLEDGE_ITEMS,max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS,max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS} })
+  try {
+    const { data, error } = await supabase.from('content_library_items').select('id').eq('customer_id', req.workspace.customerId).in('content_type',['TEXT','IMAGE']).is('archived_at', null).order('updated_at',{ascending:false})
+    if(error) throw error
+    const items=await resolveEligibleKnowledge(supabase,req.workspace.customerId,(data||[]).map(item=>item.id))
+    res.json({ items:items.map(item=>({id:item.id,name:item.name,description:item.description,updated_at:item.updated_at,source_type:item.source_type})), limits:{max_items:MAX_KNOWLEDGE_ITEMS,max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS,max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS} })
+  } catch (_) { res.status(500).json({error:'Unable to load approved knowledge'}) }
 })
 router.get('/numbers', async (req,res) => {
   const { data, error } = await supabase.from('whatsapp_numbers').select('id,phone_number,status').eq('customer_id',req.workspace.customerId).eq('status','connected')
@@ -236,7 +231,7 @@ async function liveReadiness(customerId, agent) {
   await workspaceNumber(customerId, agent.whatsapp_number_id)
   const knowledge = await knowledgeForAgent(customerId, agent.id, true)
   const links = await selectedKnowledge(customerId, knowledge.map(item => item.id))
-  if (links.length !== knowledge.length || !knowledge.length) throw new Error('Select at least one eligible approved Text knowledge item before activation')
+  if (links.length !== knowledge.length || !knowledge.length) throw new Error('Select at least one eligible approved knowledge item before activation')
   const handoff = agent.zoe_configuration?.handoff
   if (!handoff || typeof handoff !== 'object') throw new Error('Configure handoff behaviour before activation')
   const { data: conflicts, error: conflictError } = await supabase.from('ai_agents').select('id')
