@@ -4,6 +4,7 @@ const supabase = require('../lib/supabase')
 const { validateGroupName, isUniqueViolation } = require('../lib/contactGroups')
 
 const router = express.Router()
+const MAX_BATCH_CONTACTS = 1000
 
 async function findWorkspaceGroup(id, customerId) {
   const { data, error } = await supabase
@@ -35,6 +36,28 @@ function sendDatabaseError(res, error, fallback) {
   if (isUniqueViolation(error)) return res.status(409).json({ error: 'A contact group with that name already exists.' })
   console.error('Contact group operation failed', { code: error?.code, message: error?.message })
   return res.status(500).json({ error: fallback })
+}
+
+function selectedContactIds(value) {
+  if (!Array.isArray(value)) throw new Error('Choose one or more contacts.')
+  const ids = [...new Set(value.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim()))]
+  if (!ids.length || ids.length > MAX_BATCH_CONTACTS) {
+    throw new Error(`Choose between 1 and ${MAX_BATCH_CONTACTS} contacts.`)
+  }
+  return ids
+}
+
+async function batchGroupMembers(group, customerId, contactIds, operation) {
+  const rpc = operation === 'remove'
+    ? 'remove_contact_group_members_batch'
+    : 'add_contact_group_members_batch'
+  const { data, error } = await supabase.rpc(rpc, {
+    p_customer_id: customerId,
+    p_group_id: group.id,
+    p_contact_ids: contactIds
+  })
+  if (error) throw error
+  return Array.isArray(data) ? data[0] : data
 }
 
 router.get('/', async (req, res) => {
@@ -137,6 +160,50 @@ router.post('/:groupId/members', requireAdmin, async (req, res) => {
   }
 })
 
+router.post('/:groupId/members/batch', requireAdmin, async (req, res) => {
+  try {
+    const group = await findWorkspaceGroup(req.params.groupId, req.workspace.customerId)
+    if (!group) return res.status(404).json({ error: 'Contact group not found.' })
+    const result = await batchGroupMembers(
+      group,
+      req.workspace.customerId,
+      selectedContactIds(req.body?.contact_ids),
+      'add'
+    )
+    res.status(200).json({
+      added_count: Number(result?.added_count || 0),
+      already_member_count: Number(result?.already_member_count || 0),
+      failed_count: Number(result?.failed_count || 0),
+      member_count: Number(result?.member_count || 0)
+    })
+  } catch (error) {
+    if (/Choose one|Choose between/i.test(error?.message || '')) return res.status(400).json({ error: error.message })
+    return sendDatabaseError(res, error, 'Could not add contacts to this group.')
+  }
+})
+
+router.delete('/:groupId/members/batch', requireAdmin, async (req, res) => {
+  try {
+    const group = await findWorkspaceGroup(req.params.groupId, req.workspace.customerId)
+    if (!group) return res.status(404).json({ error: 'Contact group not found.' })
+    const result = await batchGroupMembers(
+      group,
+      req.workspace.customerId,
+      selectedContactIds(req.body?.contact_ids),
+      'remove'
+    )
+    res.json({
+      removed_count: Number(result?.removed_count || 0),
+      not_member_count: Number(result?.not_member_count || 0),
+      failed_count: Number(result?.failed_count || 0),
+      member_count: Number(result?.member_count || 0)
+    })
+  } catch (error) {
+    if (/Choose one|Choose between/i.test(error?.message || '')) return res.status(400).json({ error: error.message })
+    return sendDatabaseError(res, error, 'Could not remove contacts from this group.')
+  }
+})
+
 router.delete('/:groupId/members/:memberId', requireAdmin, async (req, res) => {
   try {
     const group = await findWorkspaceGroup(req.params.groupId, req.workspace.customerId)
@@ -171,3 +238,4 @@ router.delete('/:groupId', requireAdmin, async (req, res) => {
 })
 
 module.exports = router
+
