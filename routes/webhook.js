@@ -15,7 +15,7 @@ const { inboundEventPayload, isDuplicateInboundEventError } = require('../lib/in
 const { selectSoleActiveAgent } = require('../lib/aiAgentSelection')
 const { startFlow, continueFlow } = require('../lib/chatbotExecution')
 const { normalizePhone } = require('../lib/contactImport')
-const { buildLiveSystem, configuredHandoff, handoffReply, isCustomerSafeReply, hasNaturalTeamTransition, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
+const { buildLiveSystem, configuredHandoff, handoffReply, handoffConfirmation, isCustomerSafeReply, hasNaturalTeamTransition, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
 const { mayExecute } = require('../lib/aiDeploymentMode')
 
 router.get('/', (req, res) => {
@@ -357,18 +357,34 @@ async function transitionAiToHandoff(ctx, session, agent, reason) {
   })
 }
 
+async function businessNameForHandoff(ctx, agent) {
+  const { data, error } = await supabase.from('customers').select('business_name')
+    .eq('id', ctx.customerId).maybeSingle()
+  if (error) throw error
+  return data?.business_name || agent?.name || 'business'
+}
+
 async function handoffLiveAi(ctx, session, agent, reason, reply) {
-  if (reply) {
-    try { await outgoing(ctx, reply) } catch (_) { /* Team Inbox handoff remains the safe failure path. */ }
-  }
+  const confirmation = handoffConfirmation(await businessNameForHandoff(ctx, agent))
+  const supportedReply = String(reply || '').trim()
+  const customerMessage = supportedReply ? supportedReply + '\n\n' + confirmation : confirmation
+  // Delivery precedes the Team Inbox transition: a successful transition always
+  // has exactly one customer-visible final handoff message.  A delivery error is
+  // allowed to stop processing rather than risking a duplicate confirmation.
+  await outgoing(ctx, customerMessage)
   await transitionAiToHandoff(ctx, session, agent, reason)
   return true
 }
 
 async function runLiveAiTurn(ctx, session, agent, version) {
   const live = buildLiveSystem(agent, version)
+  let handoffStarted = false
+  const handoff = async (reason, reply) => {
+    handoffStarted = true
+    return handoffLiveAi(ctx, session, agent, reason, reply)
+  }
   const configured = configuredHandoff(live.configuration, ctx.body)
-  if (configured) return handoffLiveAi(ctx, session, agent, configured, handoffReply(configured, ctx.body))
+  if (configured) return handoff(configured, handoffReply(configured, ctx.body))
 
   const history = boundedHistory([...(session.messages || []), { role: 'user', content: ctx.body }])
   const started = Date.now()
@@ -380,11 +396,11 @@ async function runLiveAiTurn(ctx, session, agent, version) {
       const reply = isCustomerSafeReply(candidate) && hasNaturalTeamTransition(candidate)
         ? candidate
         : handoffReply('no_approved_answer', ctx.body)
-      return handoffLiveAi(ctx, session, agent, 'no_approved_answer', reply)
+      return handoff('no_approved_answer', reply)
     }
     if (!isCustomerSafeReply(candidate)) {
       if (live.configuration?.handoff?.unknown !== false) {
-        return handoffLiveAi(ctx, session, agent, 'no_approved_answer', handoffReply('no_approved_answer', ctx.body))
+        return handoff('no_approved_answer', handoffReply('no_approved_answer', ctx.body))
       }
       throw new Error('AI response was not customer-safe')
     }
@@ -412,7 +428,8 @@ async function runLiveAiTurn(ctx, session, agent, version) {
       agentVersion: session.agent_version, model: BETA_MODEL, outcome: 'failed', executionMode: 'live',
       durationMs: Date.now() - started, errorCategory: 'provider_or_runtime_error'
     }).catch(() => {})
-    return handoffLiveAi(ctx, session, agent, 'ai_execution_failed', null)
+    if (handoffStarted) throw _
+    return handoff('ai_execution_failed', null)
   }
 }
 
