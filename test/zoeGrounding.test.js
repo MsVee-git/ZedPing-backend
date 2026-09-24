@@ -2,7 +2,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
-const { buildLiveSystem, configuredHandoff, handoffReply, isCustomerSafeReply, hasNaturalTeamTransition, lacksLexicalSupport, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
+const { buildLiveSystem, configuredHandoff, handoffReply, handoffConfirmation, isCustomerSafeReply, hasNaturalTeamTransition, lacksLexicalSupport, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
 const webhookSource = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhook.js'), 'utf8')
 
 const agent = { name:'AutoGuard Assistant', zoe_configuration:{ communication_style:'warm', handoff:{ person:true, unknown:true, quote_or_buy:true, phrases:['complaint'] } } }
@@ -69,5 +69,26 @@ test('genuinely unknown questions preserve the natural handoff safety path', () 
   const reply = handoffReply('no_approved_answer', 'What is your warranty on an unsupported product?')
   assert.equal(isCustomerSafeReply(reply), true)
   assert.equal(hasNaturalTeamTransition(reply), true)
+})
+
+test('handoff confirmation clearly moves the customer to the business team without promising a time', () => {
+  const message = handoffConfirmation('Example Motors')
+  assert.match(message, /Example Motors team/)
+  assert.match(message, /stay available here on WhatsApp/)
+  assert.match(message, /team member will continue the conversation/)
+  assert.doesNotMatch(message, /shortly|immediately|within \d|minutes|hours/i)
+})
+
+test('live handoff sends one confirmation before Team Inbox state and preserves later suppression', () => {
+  const transition = webhookSource.indexOf('async function transitionAiToHandoff')
+  const handoff = webhookSource.indexOf('async function handoffLiveAi')
+  const process = webhookSource.indexOf('async function processMessage')
+  const handoffBody = webhookSource.slice(handoff, webhookSource.indexOf('\nasync function runLiveAiTurn', handoff))
+  const processBody = webhookSource.slice(process, webhookSource.indexOf('\nasync function outgoing', process))
+  assert.ok(handoff > transition)
+  assert.ok(handoffBody.indexOf('await outgoing(ctx, customerMessage)') < handoffBody.indexOf('await transitionAiToHandoff'))
+  assert.match(webhookSource, /if \(handoffStarted\) throw _/)
+  assert.match(processBody, /shouldSuppressAutomation\(conversation\)/)
+  assert.ok(processBody.indexOf('shouldSuppressAutomation(conversation)') < processBody.indexOf('checkAISession(ctx)'))
 })
 
