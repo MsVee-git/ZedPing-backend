@@ -38,7 +38,26 @@ async function validatedTemplate(customerId, id) {
 
 function listQuery(customerId, archived) {
   let query = supabase.from('content_library_items').select('*').eq('customer_id', customerId).order('updated_at', { ascending: false })
+  if (archived === 'all') return query
   return archived ? query.not('archived_at', 'is', null) : query.is('archived_at', null)
+}
+
+async function deletionDependencies(customerId, itemId) {
+  const [agentKnowledge, automations, ingestions, flowVersions, agentVersions] = await Promise.all([
+    supabase.from('ai_agent_knowledge_items').select('id').eq('customer_id', customerId).eq('content_library_item_id', itemId).limit(1),
+    supabase.from('automations').select('id').eq('customer_id', customerId).eq('content_library_item_id', itemId).limit(1),
+    supabase.from('content_library_ingestions').select('id').eq('customer_id', customerId).eq('source_content_item_id', itemId).limit(1),
+    supabase.from('chatbot_flow_versions').select('id,definition').eq('customer_id', customerId),
+    supabase.from('ai_agent_configuration_versions').select('id,knowledge_snapshot').eq('customer_id', customerId)
+  ])
+  for (const result of [agentKnowledge, automations, ingestions, flowVersions, agentVersions]) if (result.error) throw result.error
+  const labels = []
+  if (agentKnowledge.data?.length) labels.push('an AI Agent draft or configuration')
+  if (automations.data?.length) labels.push('an automation')
+  if (ingestions.data?.length) labels.push('image knowledge history')
+  if ((flowVersions.data || []).some(version => JSON.stringify(version.definition || {}).includes(itemId))) labels.push('a chatbot flow version')
+  if ((agentVersions.data || []).some(version => JSON.stringify(version.knowledge_snapshot || []).includes(itemId))) labels.push('an activated AI knowledge snapshot')
+  return labels
 }
 
 async function ownedItem(customerId, id) {
@@ -80,7 +99,7 @@ async function startExtraction(req, item) {
 
 router.get('/', async (req, res) => {
   try {
-    const archived = req.query.archived === 'true'
+    const archived = req.query.archived === 'all' ? 'all' : req.query.archived === 'true'
     const { data, error } = await listQuery(req.workspace.customerId, archived)
     if (error) throw error
     res.json({ items: (data || []).map(itemForClient) })
@@ -203,6 +222,31 @@ router.post('/:id/archive', requireAdmin, async (req, res) => {
     if (error) throw error
     res.json({ item: itemForClient(data) })
   } catch (error) { res.status(error.status || 500).json({ error: error.message || 'Unable to archive content' }) }
+})
+
+router.post('/:id/restore', requireAdmin, async (req, res) => {
+  try {
+    const item = await ownedItem(req.workspace.customerId, req.params.id)
+    if (!item.archived_at) return res.json({ item: itemForClient(item) })
+    const { data, error } = await supabase.from('content_library_items').update({ archived_at: null, updated_at: new Date().toISOString() }).eq('id', item.id).eq('customer_id', req.workspace.customerId).select().single()
+    if (error) throw error
+    res.json({ item: itemForClient(data) })
+  } catch (error) { res.status(error.status || 500).json({ error: error.message || 'Unable to restore content' }) }
+})
+
+router.delete('/:id', requireAdmin, async (req, res) => {
+  try {
+    const item = await ownedItem(req.workspace.customerId, req.params.id)
+    const dependencies = await deletionDependencies(req.workspace.customerId, item.id)
+    if (dependencies.length) return res.status(409).json({ error: `This content is retained because it is used by ${dependencies.join(' and ')}. Archive it instead.`, dependencies })
+    const { error } = await supabase.from('content_library_items').delete().eq('id', item.id).eq('customer_id', req.workspace.customerId)
+    if (error) throw error
+    if (item.storage_path) {
+      const { error: storageError } = await supabase.storage.from(CONTENT_BUCKET).remove([item.storage_path])
+      if (storageError) return res.status(500).json({ error: 'Content was deleted, but its private file could not be removed. Contact support.' })
+    }
+    res.status(204).end()
+  } catch (error) { res.status(error.status || 500).json({ error: error.message || 'Unable to permanently delete content' }) }
 })
 
 router.post('/:id/refresh-template', requireAdmin, async (req, res) => {
