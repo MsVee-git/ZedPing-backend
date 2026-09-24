@@ -181,7 +181,9 @@ router.patch('/:id/draft', requireAdmin, async (req,res) => {
     const knowledge = await selectedKnowledge(req.workspace.customerId, req.body?.knowledge_item_ids)
     const { data:agent,error } = await supabase.from('ai_agents').update({
       name:input.name, agent_type:input.agentType, whatsapp_number_id:number.id, zoe_template_key:input.template.key,
-      zoe_configuration:input.configuration, lifecycle_status:'draft', is_active:false, configuration_version:Number(current.configuration_version || 1)+1
+      zoe_configuration:input.configuration,
+      lifecycle_status:current.lifecycle_status === 'paused' ? 'paused' : 'draft',
+      is_active:false, configuration_version:Number(current.configuration_version || 1)+1
     }).eq('id',current.id).eq('customer_id',req.workspace.customerId).select().single()
     if (error) throw error
     await replaceKnowledge(req.workspace.customerId,agent.id,knowledge)
@@ -313,15 +315,21 @@ router.post('/:id/activate', requireAdmin, async (req,res) => {
   } catch(error) { res.status(error?.code === '23505' ? 409 : 400).json({error:error.message || 'Unable to activate AI Agent'}) }
 })
 
+async function activatedVersionForAgent(customerId, agent) {
+  const { data, error } = await supabase.from('ai_agent_configuration_versions')
+    .select('version,configuration,knowledge_snapshot,activated_at')
+    .eq('customer_id',customerId).eq('agent_id',agent.id).not('activated_at','is',null)
+    .order('version',{ascending:false}).limit(1).maybeSingle()
+  if (error) throw error
+  return data || null
+}
+
 router.post('/:id/resume', requireAdmin, async (req,res) => {
   try {
     const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
     if (isActiveAgent(agent)) return res.json({agent:safeAgent(agent), status:deploymentMode(agent)})
     if (agent.lifecycle_status !== 'paused') throw new Error('Only a paused AI Agent can be resumed')
-    const { data: version, error: versionError } = await supabase.from('ai_agent_configuration_versions')
-      .select('version,configuration,knowledge_snapshot,activated_at').eq('customer_id',req.workspace.customerId)
-      .eq('agent_id',agent.id).eq('version',agent.configuration_version).not('activated_at','is',null).maybeSingle()
-    if (versionError) throw versionError
+    const version = await activatedVersionForAgent(req.workspace.customerId, agent)
     if (!version) throw new Error('The activated AI configuration is unavailable')
     await activatedVersionReadiness(req.workspace.customerId, agent, version)
     const { data, error } = await supabase.from('ai_agents').update({lifecycle_status:'active',is_active:true})
@@ -338,10 +346,7 @@ router.post('/:id/go-live', requireAdmin, async (req,res) => {
     const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
     if (isActiveAgent(agent) && deploymentMode(agent) === 'live') return res.json({agent:safeAgent(agent), status:'live'})
     if (!mayGoLive(agent)) throw new Error('Only an active Test Mode agent can go live')
-    const { data: version, error: versionError } = await supabase.from('ai_agent_configuration_versions')
-      .select('version,configuration,knowledge_snapshot,activated_at').eq('customer_id',req.workspace.customerId)
-      .eq('agent_id',agent.id).eq('version',agent.configuration_version).not('activated_at','is',null).maybeSingle()
-    if (versionError) throw versionError
+    const version = await activatedVersionForAgent(req.workspace.customerId, agent)
     if (!version) throw new Error('The activated AI configuration is unavailable')
     await activatedVersionReadiness(req.workspace.customerId, agent, version)
     const { data, error } = await supabase.from('ai_agents').update({ deployment_mode:'live' })
@@ -385,3 +390,4 @@ router.post('/:id/pause', requireAdmin, async (req,res) => {
 })
 
 module.exports=router
+
