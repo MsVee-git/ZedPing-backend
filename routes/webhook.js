@@ -229,6 +229,62 @@ async function handoffFromAutomation(ctx, automation) {
   await recordConversationEvent({ customerId: ctx.customerId, conversationId: data.id, eventType: 'handoff_requested', metadata: { source: 'automation' } })
 }
 
+// Deliberately runs only after the human, AI-session, AI-start and active-flow
+// guards in processMessage. This preserves the D2.2 routing contract.
+async function executeAutomation(ctx, automation) {
+  const action = automation.action_config || {}
+  const kind = action.kind || (automation.chatbot_flow_id ? 'start_chatbot_flow' : 'send_text')
+  await recordAutomationEvent(ctx, 'triggered', 'success', { rule_kind: automation.automation_type || 'legacy_keyword', action_kind: kind }, automation.id)
+  if (kind === 'human_handoff') {
+    await handoffFromAutomation(ctx, automation)
+    await recordAutomationEvent(ctx, 'handoff_initiated', 'success', { action_kind: kind }, automation.id)
+    return
+  }
+  if (kind === 'start_chatbot_flow' || automation.chatbot_flow_id) {
+    await startFlow(ctx, automation.chatbot_flow_id, outgoing)
+    await recordAutomationEvent(ctx, 'response_sent', 'success', { action_kind: 'start_chatbot_flow' }, automation.id)
+    return
+  }
+  const message = await outgoing(ctx, await responseBody(ctx, automation))
+  await recordAutomationEvent(ctx, 'response_sent', 'success', { action_kind: kind, content_type: action.kind === 'content_library' ? 'content_library' : 'written_text' }, automation.id)
+  return message
+}
+
+async function runWelcome(ctx, automation) {
+  const claimed = await claimWelcome(ctx, automation.id)
+  if (!claimed) {
+    await recordAutomationEvent(ctx, 'skipped', 'skipped', { reason: 'welcome_already_delivered' }, automation.id)
+    return false
+  }
+  try {
+    const message = await executeAutomation(ctx, automation)
+    await completeWelcome(ctx, message?.id || null)
+    return true
+  } catch (error) {
+    await releaseWelcome(ctx)
+    await recordAutomationEvent(ctx, 'error', 'error', { reason: 'welcome_send_failed' }, automation.id).catch(() => {})
+    throw error
+  }
+}
+
+async function checkAutomations(ctx) {
+  const { data:list, error } = await supabase.from('automations').select('*')
+    .eq('customer_id',ctx.customerId).eq('is_active',true).is('archived_at',null)
+    .order('priority',{ascending:true}).order('created_at',{ascending:true}).order('id',{ascending:true})
+  if (error) throw error
+  const explicit = selectExplicitAutomation(list,ctx.body)
+  if (explicit) return executeAutomation(ctx,explicit)
+  const settings = await workspaceAutomationSettings(ctx.customerId)
+  if (settings && isOutsideBusinessHours(settings)) {
+    const away = selectAwayAutomation(list)
+    if (away) return executeAutomation(ctx,away)
+  }
+  const welcome = selectWelcomeAutomation(list)
+  if (welcome && await runWelcome(ctx,welcome)) return
+  const fallback = selectDefaultAutomation(list)
+  if (fallback) return executeAutomation(ctx,fallback)
+}
+
 async function isApprovedTestContact(ctx, agentId) {
   const phone = normalizePhone(ctx.from)
   const { data, error } = await supabase.from('ai_agent_test_contacts').select('id')
@@ -389,3 +445,4 @@ async function checkAISession(ctx) {
 }
 
 module.exports = router
+
