@@ -15,7 +15,7 @@ const { inboundEventPayload, isDuplicateInboundEventError } = require('../lib/in
 const { selectSoleActiveAgent } = require('../lib/aiAgentSelection')
 const { startFlow, continueFlow } = require('../lib/chatbotExecution')
 const { normalizePhone } = require('../lib/contactImport')
-const { buildLiveSystem, configuredHandoff, handoffReply, isCustomerSafeReply, hasNaturalTeamTransition, lacksLexicalSupport, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
+const { buildLiveSystem, configuredHandoff, handoffReply, isCustomerSafeReply, hasNaturalTeamTransition, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
 const { mayExecute } = require('../lib/aiDeploymentMode')
 
 router.get('/', (req, res) => {
@@ -369,9 +369,6 @@ async function runLiveAiTurn(ctx, session, agent, version) {
   const live = buildLiveSystem(agent, version)
   const configured = configuredHandoff(live.configuration, ctx.body)
   if (configured) return handoffLiveAi(ctx, session, agent, configured, handoffReply(configured, ctx.body))
-  if (live.configuration?.handoff?.unknown !== false && lacksLexicalSupport(ctx.body, live.knowledge)) {
-    return handoffLiveAi(ctx, session, agent, 'no_approved_answer', handoffReply('no_approved_answer', ctx.body))
-  }
 
   const history = boundedHistory([...(session.messages || []), { role: 'user', content: ctx.body }])
   const started = Date.now()
