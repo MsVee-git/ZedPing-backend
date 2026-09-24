@@ -18,8 +18,7 @@ test('Go Live promotes only an active Test agent using its activated immutable v
   assert.match(body, /requireAdmin/)
   assert.match(body, /mayGoLive\(agent\)/)
   assert.match(body, /deploymentMode\(agent\) === 'live'/)
-  assert.match(body, /ai_agent_configuration_versions/)
-  assert.match(body, /knowledge_snapshot/)
+  assert.match(body, /activatedVersionForAgent/)
   assert.match(body, /activatedVersionReadiness\(req\.workspace\.customerId, agent, version\)/)
   assert.doesNotMatch(body, /liveReadiness\(/)
   assert.match(body, /update\(\{ deployment_mode:'live' \}\)/)
@@ -32,13 +31,14 @@ test('Resume and Go Live validate immutable snapshots rather than mutable draft 
   const resume = routeBody('/:id/resume')
   const goLive = routeBody('/:id/go-live')
   for (const body of [resume, goLive]) {
-    assert.match(body, /ai_agent_configuration_versions/)
-    assert.match(body, /knowledge_snapshot/)
+    assert.match(body, /activatedVersionForAgent/)
     assert.match(body, /activatedVersionReadiness/)
     assert.doesNotMatch(body, /knowledgeForAgent\(/)
     assert.doesNotMatch(body, /replaceKnowledge\(/)
   }
-  assert.match(routeSource, /function assertActivatedSnapshot/)
+  assert.match(routeSource, /function activatedVersionForAgent/)
+  assert.match(routeSource, /ai_agent_configuration_versions/)
+  assert.match(routeSource, /knowledge_snapshot/)
   assert.match(routeSource, /!knowledge\.length/)
   assert.match(routeSource, /config\.configuration\?\.handoff/)
 })
@@ -67,6 +67,17 @@ test('Pause and Resume preserve deployment mode without starting sessions or sen
   assert.doesNotMatch(resume, /sendWhatsApp/)
 })
 
+test('paused draft edits preserve the paused lifecycle and Resume loads the immutable activated version', () => {
+  const start = routeSource.indexOf("router.patch('/:id/draft'")
+  const end = routeSource.indexOf('\nrouter.', start + 1)
+  const draft = routeSource.slice(start, end)
+  const resume = routeBody('/:id/resume')
+  assert.match(draft, /current\.lifecycle_status === 'paused' \? 'paused' : 'draft'/)
+  assert.match(resume, /activatedVersionForAgent/)
+  assert.match(routeSource, /not\('activated_at','is',null\)/)
+  assert.doesNotMatch(resume, /knowledgeForAgent\(/)
+})
+
 test('all lifecycle mutations remain owner/admin-only and workspace-scoped', () => {
   for (const name of ['/:id/go-live', '/:id/test-mode', '/:id/pause', '/:id/resume']) {
     const body = routeBody(name)
@@ -74,3 +85,4 @@ test('all lifecycle mutations remain owner/admin-only and workspace-scoped', () 
     assert.match(body, /req\.workspace\.customerId/)
   }
 })
+
