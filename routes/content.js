@@ -43,18 +43,20 @@ function listQuery(customerId, archived) {
 }
 
 async function deletionDependencies(customerId, itemId) {
-  const [agentKnowledge, automations, ingestions, flowVersions, agentVersions] = await Promise.all([
+  const [agentKnowledge, automations, ingestions, flowDrafts, flowVersions, agentVersions] = await Promise.all([
     supabase.from('ai_agent_knowledge_items').select('id').eq('customer_id', customerId).eq('content_library_item_id', itemId).limit(1),
     supabase.from('automations').select('id').eq('customer_id', customerId).eq('content_library_item_id', itemId).limit(1),
     supabase.from('content_library_ingestions').select('id').eq('customer_id', customerId).eq('source_content_item_id', itemId).limit(1),
+    supabase.from('chatbot_flows').select('id,draft_definition').eq('customer_id', customerId),
     supabase.from('chatbot_flow_versions').select('id,definition').eq('customer_id', customerId),
     supabase.from('ai_agent_configuration_versions').select('id,knowledge_snapshot').eq('customer_id', customerId)
   ])
-  for (const result of [agentKnowledge, automations, ingestions, flowVersions, agentVersions]) if (result.error) throw result.error
+  for (const result of [agentKnowledge, automations, ingestions, flowDrafts, flowVersions, agentVersions]) if (result.error) throw result.error
   const labels = []
   if (agentKnowledge.data?.length) labels.push('an AI Agent draft or configuration')
   if (automations.data?.length) labels.push('an automation')
   if (ingestions.data?.length) labels.push('image knowledge history')
+  if ((flowDrafts.data || []).some(flow => JSON.stringify(flow.draft_definition || {}).includes(itemId))) labels.push('a chatbot flow draft')
   if ((flowVersions.data || []).some(version => JSON.stringify(version.definition || {}).includes(itemId))) labels.push('a chatbot flow version')
   if ((agentVersions.data || []).some(version => JSON.stringify(version.knowledge_snapshot || []).includes(itemId))) labels.push('an activated AI knowledge snapshot')
   return labels
@@ -243,9 +245,9 @@ router.delete('/:id', requireAdmin, async (req, res) => {
     if (error) throw error
     if (item.storage_path) {
       const { error: storageError } = await supabase.storage.from(CONTENT_BUCKET).remove([item.storage_path])
-      if (storageError) return res.status(500).json({ error: 'Content was deleted, but its private file could not be removed. Contact support.' })
+      if (storageError) return res.json({ deleted: true, storage_cleanup: 'failed', warning: 'Content was deleted, but its private file needs cleanup. Contact support.' })
     }
-    res.status(204).end()
+    res.json({ deleted: true, storage_cleanup: 'complete' })
   } catch (error) { res.status(error.status || 500).json({ error: error.message || 'Unable to permanently delete content' }) }
 })
 
