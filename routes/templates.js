@@ -4,6 +4,7 @@ const router = express.Router()
 const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
 const { createMetaTemplateClient, MetaTemplateError } = require('../lib/metaTemplates')
+const { resolveConnectedNumber, loadWorkspaceTemplates, safeTemplate } = require('../lib/workspaceTemplates')
 const { sendTemplateMessage, uploadWhatsAppMedia } = require('../lib/whatsapp')
 const { validateTemplateHeaderMedia } = require('../lib/templateMedia')
 
@@ -34,43 +35,18 @@ function safeRecipient(value) {
   return /^[1-9]\d{7,14}$/.test(digits) ? digits : null
 }
 
-async function resolveConnectedNumber(customerId) {
-  const { data, error } = await supabase
-    .from('whatsapp_numbers')
-    .select('id, customer_id, phone_number_id, whatsapp_business_account_id, access_token, display_name, status')
-    .eq('customer_id', customerId)
-    .eq('status', 'connected')
-
-  if (error) throw error
-  if (!data?.length) return { kind: 'none' }
-  // Phase 2 presents one number per workspace. Do not make an arbitrary
-  // choice if a future multi-number workspace is encountered.
-  if (data.length !== 1) return { kind: 'ambiguous' }
-  const number = data[0]
-  if (!number.phone_number_id || !number.whatsapp_business_account_id) return { kind: 'invalid' }
-  return { kind: 'ok', number }
-}
-
-async function loadTemplates(customerId) {
-  const resolved = await resolveConnectedNumber(customerId)
-  if (resolved.kind !== 'ok') return resolved
-  const meta = createMetaTemplateClient()
-  const templates = await meta.listTemplates({
-    wabaId: resolved.number.whatsapp_business_account_id,
-    accessToken: resolved.number.access_token
-  })
-  return { ...resolved, meta, templates }
-}
+const loadTemplates = loadWorkspaceTemplates
 
 router.get('/', async (req, res) => {
   try {
-    const result = await loadTemplates(req.workspace.customerId)
+    const selectedNumberId = typeof req.query.whatsapp_number_id === 'string' ? req.query.whatsapp_number_id : null
+    const result = await loadTemplates(req.workspace.customerId, selectedNumberId)
     if (result.kind === 'none') return res.status(404).json({ error: 'No connected WhatsApp number is available for this workspace' })
     if (result.kind === 'ambiguous') return res.status(409).json({ error: 'Select a WhatsApp number before viewing templates' })
     if (result.kind === 'invalid') return res.status(409).json({ error: 'The connected WhatsApp number is incomplete' })
 
     return res.json({
-      templates: result.templates.map(({ id, name, status, category, language, components }) => ({ id, name, status, category, language, components: components || [] })),
+      templates: result.templates.map(safeTemplate),
       connection: {
         display_name: result.number.display_name || null,
         phone_number_id: result.number.phone_number_id
@@ -234,3 +210,4 @@ router.post('/send', requireAdmin, parseTemplateUpload, async (req, res) => {
 })
 
 module.exports = router
+
