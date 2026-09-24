@@ -297,7 +297,11 @@ async function loadLiveVersion(ctx, agent) {
   const { data, error } = await supabase.from('ai_agent_configuration_versions')
     .select('version,configuration,knowledge_snapshot,activated_at')
     .eq('customer_id', ctx.customerId).eq('agent_id', agent.id)
-    .eq('version', agent.configuration_version).not('activated_at', 'is', null).maybeSingle()
+    // A paused agent may receive draft edits.  Those edits intentionally create
+    // unactivated draft revisions, so the mutable agent pointer is not a safe
+    // runtime source of truth.  Live execution must always load the newest
+    // immutable version that was explicitly activated for this agent.
+    .not('activated_at', 'is', null).order('version', { ascending: false }).limit(1).maybeSingle()
   if (error) throw error
   return data || null
 }
@@ -315,7 +319,7 @@ async function startLiveZoeSession(ctx) {
   const now = new Date()
   const { data: session, error: sessionError } = await supabase.from('ai_agent_sessions').insert({
     customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, agent_id: agent.id,
-    agent_version: agent.configuration_version, contact_phone: ctx.from, contact_id: ctx.contact.id,
+    agent_version: version.version, contact_phone: ctx.from, contact_id: ctx.contact.id,
     conversation_id: ctx.conversation.id, messages: [], status: 'active',
     started_at: now.toISOString(), last_activity_at: now.toISOString(),
     expires_at: new Date(now.getTime() + SESSION_IDLE_MS).toISOString()
