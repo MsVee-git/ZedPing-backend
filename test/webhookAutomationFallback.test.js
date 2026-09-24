@@ -15,3 +15,13 @@ test('non-AI inbound messages retain deterministic automation fallback', () => {
   assert.ok(source.indexOf('if (await continueFlow(ctx, outgoing)) return') < source.indexOf('await checkAutomations(ctx)'))
 })
 
+test('runtime loads the latest activated immutable version after a paused draft edit', () => {
+  const start = source.indexOf('async function loadLiveVersion(ctx, agent)')
+  const end = source.indexOf('\nasync function startLiveZoeSession', start)
+  const body = source.slice(start, end)
+  assert.match(body, /not\('activated_at', 'is', null\)/)
+  assert.match(body, /order\('version', \{ ascending: false \}\)/)
+  assert.doesNotMatch(body, /eq\('version', agent\.configuration_version\)/)
+  assert.match(source, /agent_version: version\.version/)
+})
+
