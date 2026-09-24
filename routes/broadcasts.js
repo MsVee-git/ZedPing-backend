@@ -8,6 +8,29 @@ const { loadWorkspaceTemplates } = require('../lib/workspaceTemplates')
 const { describeTemplate, resolveTemplateRecipients } = require('../lib/broadcastTemplates')
 const { MetaTemplateError } = require('../lib/metaTemplates')
 
+// The Meta Phone Number ID is an API identifier, never a customer-facing
+// telephone number. Keep it internal and derive display data from the
+// canonical connected-number record instead.
+function displayPhoneNumber(number) {
+  const raw = String(number?.phone_number || '').trim()
+  if (!raw) return null
+  const digits = raw.replace(/\D/g, '')
+  if (!digits) return null
+  // Make the existing Zambian canonical format easy to scan without changing
+  // storage. Other connected international numbers still retain their E.164
+  // representation rather than being confused with a Meta ID.
+  if (digits.length === 12 && digits.startsWith('260')) return `+260 ${digits.slice(3, 6)} ${digits.slice(6, 9)} ${digits.slice(9)}`
+  return raw.startsWith('+') ? raw : `+${digits}`
+}
+
+function publicConnection(number) {
+  return {
+    id: number.id,
+    display_name: number.display_name || null,
+    display_phone_number: displayPhoneNumber(number)
+  }
+}
+
 async function numberFor(workspace, id) {
   if (!id || typeof id !== 'string') return null
   const { data, error } = await supabase.from('whatsapp_numbers').select('*')
@@ -69,11 +92,11 @@ async function templateReview(workspace, body) {
 router.get('/setup', requireAdmin, async (req, res) => {
   try {
     const [{ data: numbers, error: numbersError }, { data: groups, error: groupsError }] = await Promise.all([
-      supabase.from('whatsapp_numbers').select('id,phone_number_id,display_name,status').eq('customer_id', req.workspace.customerId).eq('status', 'connected').order('created_at'),
+      supabase.from('whatsapp_numbers').select('id,phone_number,phone_number_id,display_name,status').eq('customer_id', req.workspace.customerId).eq('status', 'connected').order('created_at'),
       supabase.from('contact_groups').select('id,name,description,total_contacts').eq('customer_id', req.workspace.customerId).order('name')
     ])
     if (numbersError || groupsError) throw numbersError || groupsError
-    res.json({ numbers: numbers || [], groups: groups || [] })
+    res.json({ numbers: (numbers || []).map(publicConnection), groups: groups || [] })
   } catch (_) { res.status(500).json({ error: 'Could not load broadcast setup.' }) }
 })
 
@@ -83,7 +106,7 @@ router.get('/templates', requireAdmin, async (req, res) => {
     if (!number) return res.status(404).json({ error: 'Choose a connected WhatsApp number in the active workspace.' })
     const catalog = await loadWorkspaceTemplates(req.workspace.customerId, number.id)
     if (catalog.kind !== 'ok') return res.status(409).json({ error: 'Templates are unavailable for this WhatsApp number.' })
-    res.json({ connection: { id: number.id, display_name: number.display_name || null, phone_number_id: number.phone_number_id }, templates: catalog.templates.map(describeTemplate) })
+    res.json({ connection: publicConnection(number), templates: catalog.templates.map(describeTemplate) })
   } catch (error) { fail(res, error) }
 })
 
@@ -91,7 +114,7 @@ router.post('/review-template', requireAdmin, async (req, res) => {
   try {
     const review = await templateReview(req.workspace.customerId, req.body || {})
     if (review.error) return res.status(review.status || 400).json({ error: review.error })
-    res.json({ sending_number: { id: review.number.id, display_name: review.number.display_name || null, phone_number_id: review.number.phone_number_id }, audience: { id: review.group.id, name: review.group.name }, template: review.template, variable_mappings: review.mappings, total_selected: review.total_selected, eligible_recipients: review.eligible_recipients, skipped_recipients: review.skipped_recipients, unresolved: review.unresolved.map((item) => ({ reason: item.reason })) })
+    res.json({ sending_number: publicConnection(review.number), audience: { id: review.group.id, name: review.group.name }, template: review.template, variable_mappings: review.mappings, total_selected: review.total_selected, eligible_recipients: review.eligible_recipients, skipped_recipients: review.skipped_recipients, unresolved: review.unresolved.map((item) => ({ reason: item.reason })) })
   } catch (error) { fail(res, error) }
 })
 
