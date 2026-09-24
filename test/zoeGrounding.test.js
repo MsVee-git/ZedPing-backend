@@ -1,6 +1,9 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
 const { buildLiveSystem, configuredHandoff, handoffReply, isCustomerSafeReply, hasNaturalTeamTransition, lacksLexicalSupport, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
+const webhookSource = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhook.js'), 'utf8')
 
 const agent = { name:'AutoGuard Assistant', zoe_configuration:{ communication_style:'warm', handoff:{ person:true, unknown:true, quote_or_buy:true, phrases:['complaint'] } } }
 const version = { configuration:{ name:'AutoGuard Assistant', configuration:agent.zoe_configuration }, knowledge_snapshot:[{id:'safe-id',name:'Services',text_content:'We provide vehicle servicing and resprays.'}] }
@@ -41,10 +44,30 @@ test('deterministic handoff replies are natural and never expose internal termin
   assert.equal(isCustomerSafeReply('This needs escalation from the AI agent.'), false)
 })
 
-test('known questions remain available for normal answers while partial answers are instructed to connect the team', () => {
+test('known questions answer first and use clarification before a team connection', () => {
   const live = buildLiveSystem(agent, version)
   assert.equal(configuredHandoff(agent.zoe_configuration, 'Tell me about vehicle servicing'), null)
   assert.equal(lacksLexicalSupport('Tell me about vehicle servicing', live.knowledge), false)
-  assert.match(live.prompt, /give any directly supported part of the answer first/)
-  assert.match(live.prompt, /offer to connect the customer with them/)
+  assert.match(live.prompt, /all directly supported facts/)
+  assert.match(live.prompt, /clarified from the customer is not, by itself, a reason/)
+  assert.match(live.prompt, /give the known categories or examples first/)
+  assert.match(live.prompt, /Do not invent prices, stock, availability/)
 })
+
+test('runtime lets the model assess non-explicit questions from immutable knowledge', () => {
+  const start = webhookSource.indexOf('async function runLiveAiTurn')
+  const end = webhookSource.indexOf('\nasync function checkAISession', start)
+  const body = webhookSource.slice(start, end)
+  assert.match(body, /configuredHandoff/)
+  assert.match(body, /getAICompletion/)
+  assert.match(body, /requestsModelHandoff/)
+  assert.doesNotMatch(body, /lacksLexicalSupport/)
+  assert.match(body, /boundedHistory/)
+})
+
+test('genuinely unknown questions preserve the natural handoff safety path', () => {
+  const reply = handoffReply('no_approved_answer', 'What is your warranty on an unsupported product?')
+  assert.equal(isCustomerSafeReply(reply), true)
+  assert.equal(hasNaturalTeamTransition(reply), true)
+})
+
