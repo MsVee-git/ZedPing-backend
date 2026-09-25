@@ -8,7 +8,7 @@ const { recordConversationEvent } = require('../lib/conversationEvents')
 const { handoffActiveFlowForConversation } = require('../lib/chatbotExecution')
 const { closeActiveAiSessionsForConversation } = require('../lib/aiAgentSessions')
 
-const CONVERSATION_FIELDS = 'id, customer_id, whatsapp_number_id, contact_id, status, control_mode, assigned_user_id, handoff_reason, handoff_at, taken_over_at, resolved_at, resolved_by_user_id, last_message_at, last_inbound_at, last_outbound_at, unread_count, created_at, updated_at, contacts(id,name,phone_number,tag)'
+const CONVERSATION_FIELDS = 'id, customer_id, whatsapp_number_id, contact_id, status, control_mode, assigned_user_id, handoff_reason, handoff_at, taken_over_at, resolved_at, resolved_by_user_id, last_message_at, last_inbound_at, last_outbound_at, unread_count, created_at, updated_at, contacts(id,name,phone_number,tag,marketing_opted_out)'
 
 function isAdmin(role) {
   return ['owner', 'admin'].includes(role)

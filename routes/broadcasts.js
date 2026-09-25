@@ -88,7 +88,7 @@ async function templateReview(workspace, body) {
   if (!template) return { error: 'This template is not available for the selected WhatsApp business.', status: 403 }
   const marketing = await filterWorkspaceMarketingRecipients(supabase, workspace, audience.recipients)
   const resolved = resolveTemplateRecipients(template, marketing.eligible, body?.variable_mappings)
-  return { number, group: audience.group, ...resolved, total_selected: audience.recipients.length, eligible_recipients: resolved.recipients.length, opted_out_recipients: marketing.optedOut.length, skipped_recipients: resolved.unresolved.length }
+  return { number, group: audience.group, ...resolved, total_selected: audience.recipients.length, eligible_recipients: resolved.recipients.length, opted_out_recipients: marketing.optedOut.length, suppressed: marketing.optedOut.map(({ id, name, phone_number }) => ({ id, name, phone_number })), skipped_recipients: resolved.unresolved.length }
 }
 
 router.get('/setup', requireAdmin, async (req, res) => {
@@ -116,7 +116,7 @@ router.post('/review-template', requireAdmin, async (req, res) => {
   try {
     const review = await templateReview(req.workspace.customerId, req.body || {})
     if (review.error) return res.status(review.status || 400).json({ error: review.error })
-    res.json({ sending_number: publicConnection(review.number), audience: { id: review.group.id, name: review.group.name }, template: review.template, variable_mappings: review.mappings, total_selected: review.total_selected, eligible_recipients: review.eligible_recipients, opted_out_recipients: review.opted_out_recipients, skipped_recipients: review.skipped_recipients, unresolved: review.unresolved.map((item) => ({ reason: item.reason })) })
+    res.json({ sending_number: publicConnection(review.number), audience: { id: review.group.id, name: review.group.name }, template: review.template, variable_mappings: review.mappings, total_selected: review.total_selected, eligible_recipients: review.eligible_recipients, opted_out_recipients: review.opted_out_recipients, suppressed: review.suppressed, skipped_recipients: review.skipped_recipients, unresolved: review.unresolved.map((item) => ({ reason: item.reason })) })
   } catch (error) { fail(res, error) }
 })
 
@@ -172,6 +172,19 @@ router.get('/scheduled', async (req, res) => {
   const { data, error } = await supabase.from('scheduled_broadcasts').select('*').eq('customer_id', req.workspace.customerId).order('scheduled_at')
   if (error) return res.status(500).json({ error: 'Could not load broadcast activity.' })
   res.json(data)
+})
+
+// Historical facts only: never join current contact consent or group membership.
+router.get('/scheduled/:id', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('scheduled_broadcasts')
+      .select('id,broadcast_name,message,contacts,status,sent_count,failed_count,created_at,scheduled_at,completed_at')
+      .eq('id', req.params.id).eq('customer_id', req.workspace.customerId).maybeSingle()
+    if (error) throw error
+    if (!data) return res.status(404).json({ error: 'Broadcast not found.' })
+    const { contacts, ...broadcast } = data
+    res.json({ ...broadcast, recorded_recipients: Array.isArray(contacts) ? contacts.length : null })
+  } catch (_) { res.status(500).json({ error: 'Could not load broadcast details.' }) }
 })
 
 module.exports = router

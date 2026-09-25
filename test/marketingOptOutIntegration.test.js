@@ -60,7 +60,7 @@ function loadRoute(file, db) {
   const filename = path.join(__dirname, '..', 'routes', file + '.js')
   const localRequire = createRequire(filename)
   const routes = new Map(), sent = [], routed = []
-  const router = { get() {}, post(url, ...handlers) { routes.set(url, handlers.at(-1)) } }
+  const router = { get(url, ...handlers) { routes.set(url, handlers.at(-1)) }, post(url, ...handlers) { routes.set(url, handlers.at(-1)) } }
   const catalog = { kind: 'ok', templates: [{ id: 'template-a', name: 'offer', status: 'APPROVED', category: 'MARKETING', language: 'en', components: [{ type: 'BODY', text: 'Hi {{1}}' }] }] }
   const stubs = {
     express: { Router: () => router },
@@ -270,4 +270,45 @@ test('suppression is paginated and matches duplicate saved contacts by canonical
   assert.equal(result.eligible.length, 0)
   assert.equal(result.optedOut.length, 1)
   assert.equal(db.calls.length, 2)
+})
+
+test('five selected with one opted out reviews as 5/4/1 and exposes only suppressed contact identity', async () => {
+  const contacts = Array.from({ length: 5 }, (_, i) => contact('contact-' + i, '+26097100000' + i, i === 4))
+  const db = fixture(contacts), route = loadRoute('broadcasts', db)
+  const review = await request(route, '/review-template')
+  assert.equal(review.body.total_selected, 5)
+  assert.equal(review.body.eligible_recipients, 4)
+  assert.equal(review.body.opted_out_recipients, 1)
+  assert.equal(review.body.skipped_recipients, 0)
+  assert.deepEqual(review.body.suppressed, [{ id: 'contact-4', name: 'Customer', phone_number: '+260971000004' }])
+  assert.equal(route.sent.length, 0)
+  const sent = await request(route, '/send-template')
+  assert.equal(sent.body.accepted, 4)
+  assert.ok(route.sent.every(call => call.args[1] !== '+260971000004'))
+})
+
+test('broadcast details report persisted history without consulting current consent or exposing Meta IDs', async () => {
+  const db = fixture()
+  db.tables.scheduled_broadcasts = [{ id: 'history', customer_id: 'a', broadcast_name: 'lead_followup', message: '[Template] lead_followup (en_US)', contacts: Array.from({ length: 5 }, (_, id) => ({ id })), status: 'completed', sent_count: 5, failed_count: 0, phone_number_id: 'internal-meta-id' }]
+  const route = loadRoute('broadcasts', db)
+  const read = async workspace => {
+    const result = { status: 200 }
+    const res = { status(code) { result.status = code; return res }, json(body) { result.body = JSON.parse(JSON.stringify(body)) } }
+    await route.routes.get('/scheduled/:id')({ workspace: { customerId: workspace }, params: { id: 'history' } }, res)
+    return result
+  }
+  const original = structuredClone(db.tables.scheduled_broadcasts)
+  const result = await read('a')
+  assert.equal(result.status, 200)
+  assert.equal(result.body.recorded_recipients, 5)
+  assert.equal(result.body.sent_count, 5)
+  assert.equal(result.body.failed_count, 0)
+  assert.equal('contacts' in result.body, false)
+  assert.equal('phone_number_id' in result.body, false)
+  assert.equal('opted_out_recipients' in result.body, false)
+  db.tables.contacts.forEach(row => { row.marketing_opted_out = true })
+  assert.deepEqual((await read('a')).body, result.body)
+  assert.equal((await read('b')).status, 404)
+  assert.deepEqual(db.tables.scheduled_broadcasts, original)
+  assert.ok(db.calls.every(call => call.table === 'scheduled_broadcasts' && call.operation === 'select'))
 })
