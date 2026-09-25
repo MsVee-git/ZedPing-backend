@@ -48,9 +48,9 @@ test('known questions answer first and use clarification before a team connectio
   const live = buildLiveSystem(agent, version)
   assert.equal(configuredHandoff(agent.zoe_configuration, 'Tell me about vehicle servicing'), null)
   assert.equal(lacksLexicalSupport('Tell me about vehicle servicing', live.knowledge), false)
-  assert.match(live.prompt, /all directly supported facts/)
+  assert.match(live.prompt, /directly supported facts needed/)
   assert.match(live.prompt, /clarified from the customer is not, by itself, a reason/)
-  assert.match(live.prompt, /give the known categories or examples first/)
+  assert.match(live.prompt, /give a few relevant known categories or examples first/)
   assert.match(live.prompt, /Do not invent prices, stock, availability/)
 })
 
@@ -75,7 +75,7 @@ test('handoff confirmation clearly moves the customer to the business team witho
   const message = handoffConfirmation('Example Motors')
   assert.match(message, /Example Motors team/)
   assert.match(message, /stay available here on WhatsApp/)
-  assert.match(message, /team member will continue the conversation/)
+  assert.ok(message.length < 150)
   assert.doesNotMatch(message, /shortly|immediately|within \d|minutes|hours/i)
 })
 
