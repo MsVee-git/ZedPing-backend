@@ -3,6 +3,7 @@ const crypto = require('crypto')
 const router = express.Router()
 const supabase = require('../lib/supabase')
 const { sendTextMessage } = require('../lib/whatsapp')
+const { isMarketingOptOutCommand } = require('../lib/marketingOptOut')
 const { getAICompletion } = require('../lib/openai')
 const { BETA_MODEL, boundedHistory, sessionExpired, estimateCostUsd, isHandoffRequested, SESSION_IDLE_MS } = require('../lib/aiRuntime')
 const { recordAiExecutionEvent } = require('../lib/aiExecutionEvents')
@@ -159,6 +160,15 @@ async function processMessage(ctx) {
   const conversation = await persistInbound(ctx, contact, existing)
   ctx.contact = contact
   ctx.conversation = conversation
+
+  if (isMarketingOptOutCommand(ctx.body)) {
+    const { data: updated, error } = await supabase.from('contacts')
+      .update({ marketing_opted_out: true, marketing_opted_out_at: new Date().toISOString(), marketing_opt_out_source: 'whatsapp_stop' })
+      .eq('id', contact.id).eq('customer_id', ctx.customerId).eq('marketing_opted_out', false).select('id').maybeSingle()
+    if (error) throw error
+    if (updated) await outgoing(ctx, `You've been unsubscribed from promotional WhatsApp messages from ${String(ctx.number.display_name || 'this business').trim()}. You can still message us here if you need assistance.`)
+    return
+  }
 
   // This server-side guard is intentionally before AI, flow and keyword execution.
   // Needs-attention and human conversations keep receiving/persisting inbound

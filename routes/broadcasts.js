@@ -7,6 +7,7 @@ const { transientRecipient, dedupeRecipients } = require('../lib/broadcastRecipi
 const { loadWorkspaceTemplates } = require('../lib/workspaceTemplates')
 const { describeTemplate, resolveTemplateRecipients } = require('../lib/broadcastTemplates')
 const { MetaTemplateError } = require('../lib/metaTemplates')
+const { filterWorkspaceMarketingRecipients } = require('../lib/marketingOptOut')
 
 // The Meta Phone Number ID is an API identifier, never a customer-facing
 // telephone number. Keep it internal and derive display data from the
@@ -42,7 +43,7 @@ async function recipientsForWorkspace(workspace, requested) {
   if (!Array.isArray(requested) || !requested.length) return { error: 'At least one recipient is required' }
   const ids = [...new Set(requested.map((item) => item?.id).filter(Boolean))]
   const { data: saved = [], error } = ids.length
-    ? await supabase.from('contacts').select('id,name,phone_number,email,custom_fields').eq('customer_id', workspace).in('id', ids)
+    ? await supabase.from('contacts').select('id,name,phone_number,email,custom_fields,marketing_opted_out').eq('customer_id', workspace).in('id', ids)
     : { data: [], error: null }
   if (error) throw error
   if (saved.length !== ids.length) return { error: 'One or more contacts do not belong to this workspace', status: 403 }
@@ -66,7 +67,7 @@ async function audienceForGroup(workspace, groupId) {
   const ids = [...new Set((links || []).map((item) => item.contact_id).filter(Boolean))]
   if (!ids.length) return { group, recipients: [] }
   const { data: contacts, error: contactError } = await supabase.from('contacts')
-    .select('id,name,phone_number,email,custom_fields').eq('customer_id', workspace).in('id', ids)
+    .select('id,name,phone_number,email,custom_fields,marketing_opted_out').eq('customer_id', workspace).in('id', ids)
   if (contactError) throw contactError
   return { group, recipients: dedupeRecipients(contacts || []) }
 }
@@ -85,8 +86,9 @@ async function templateReview(workspace, body) {
   if (catalog.kind !== 'ok') return { error: 'Templates are unavailable for this WhatsApp number.', status: 409 }
   const template = catalog.templates.find((item) => String(item.id) === String(body?.template_id || ''))
   if (!template) return { error: 'This template is not available for the selected WhatsApp business.', status: 403 }
-  const resolved = resolveTemplateRecipients(template, audience.recipients, body?.variable_mappings)
-  return { number, group: audience.group, ...resolved, total_selected: audience.recipients.length, eligible_recipients: resolved.recipients.length, skipped_recipients: resolved.unresolved.length }
+  const marketing = await filterWorkspaceMarketingRecipients(supabase, workspace, audience.recipients)
+  const resolved = resolveTemplateRecipients(template, marketing.eligible, body?.variable_mappings)
+  return { number, group: audience.group, ...resolved, total_selected: audience.recipients.length, eligible_recipients: resolved.recipients.length, opted_out_recipients: marketing.optedOut.length, skipped_recipients: resolved.unresolved.length }
 }
 
 router.get('/setup', requireAdmin, async (req, res) => {
@@ -114,7 +116,7 @@ router.post('/review-template', requireAdmin, async (req, res) => {
   try {
     const review = await templateReview(req.workspace.customerId, req.body || {})
     if (review.error) return res.status(review.status || 400).json({ error: review.error })
-    res.json({ sending_number: publicConnection(review.number), audience: { id: review.group.id, name: review.group.name }, template: review.template, variable_mappings: review.mappings, total_selected: review.total_selected, eligible_recipients: review.eligible_recipients, skipped_recipients: review.skipped_recipients, unresolved: review.unresolved.map((item) => ({ reason: item.reason })) })
+    res.json({ sending_number: publicConnection(review.number), audience: { id: review.group.id, name: review.group.name }, template: review.template, variable_mappings: review.mappings, total_selected: review.total_selected, eligible_recipients: review.eligible_recipients, opted_out_recipients: review.opted_out_recipients, skipped_recipients: review.skipped_recipients, unresolved: review.unresolved.map((item) => ({ reason: item.reason })) })
   } catch (error) { fail(res, error) }
 })
 
@@ -138,7 +140,7 @@ router.post('/send-template', requireAdmin, async (req, res) => {
     const accepted = results.filter((item) => item.status === 'sent').length
     const failed = results.length - accepted
     await supabase.from('scheduled_broadcasts').update({ status: accepted ? 'completed' : 'failed', sent_count: accepted, failed_count: failed, completed_at: new Date().toISOString() }).eq('id', activity.id).eq('customer_id', req.workspace.customerId)
-    res.json({ success: true, activity_id: activity.id, accepted, failed })
+    res.json({ success: true, activity_id: activity.id, accepted, failed, opted_out_recipients: review.opted_out_recipients })
   } catch (error) { fail(res, error) }
 })
 
@@ -150,17 +152,19 @@ router.post('/send', requireAdmin, async (req, res) => {
     if (!number) return res.status(404).json({ error: 'Connected WhatsApp number not found' })
     const resolved = await recipientsForWorkspace(req.workspace.customerId, contacts)
     if (resolved.error) return res.status(resolved.status || 400).json({ error: resolved.error })
+    const marketing = await filterWorkspaceMarketingRecipients(supabase, req.workspace.customerId, resolved.recipients)
+    if (!marketing.eligible.length) return res.status(400).json({ error: 'No recipients can receive this broadcast.', opted_out_recipients: marketing.optedOut.length })
     const body = String(message).trim()
-    const { data: activity, error } = await supabase.from('scheduled_broadcasts').insert({ customer_id: req.workspace.customerId, broadcast_name: String(req.body.broadcast_name || 'Immediate Broadcast').trim().slice(0, 160) || 'Immediate Broadcast', contacts: resolved.recipients, message: body, phone_number_id: number.phone_number_id, scheduled_at: new Date().toISOString(), status: 'sending' }).select().single()
+    const { data: activity, error } = await supabase.from('scheduled_broadcasts').insert({ customer_id: req.workspace.customerId, broadcast_name: String(req.body.broadcast_name || 'Immediate Broadcast').trim().slice(0, 160) || 'Immediate Broadcast', contacts: marketing.eligible, message: body, phone_number_id: number.phone_number_id, scheduled_at: new Date().toISOString(), status: 'sending' }).select().single()
     if (error) throw error
     const results = []
-    for (const contact of resolved.recipients) {
+    for (const contact of marketing.eligible) {
       try { await sendTextMessage(number.phone_number_id, contact.phone_number, body, number.access_token); results.push({ status: 'sent' }) } catch (_) { results.push({ status: 'failed' }) }
     }
     const accepted = results.filter((item) => item.status === 'sent').length
     const failed = results.length - accepted
     await supabase.from('scheduled_broadcasts').update({ status: accepted ? 'completed' : 'failed', sent_count: accepted, failed_count: failed, completed_at: new Date().toISOString() }).eq('id', activity.id).eq('customer_id', req.workspace.customerId)
-    res.json({ success: true, activity_id: activity.id, accepted, failed })
+    res.json({ success: true, activity_id: activity.id, accepted, failed, opted_out_recipients: marketing.optedOut.length })
   } catch (_) { res.status(502).json({ error: 'Broadcast could not be sent' }) }
 })
 

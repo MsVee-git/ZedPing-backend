@@ -11,7 +11,7 @@ test('template broadcast review is manager-only and resolves every browser selec
   assert.match(source, /router\.post\('\/send-template', requireAdmin/)
   assert.match(source, /eq\('customer_id', workspace\)/)
   assert.match(source, /loadWorkspaceTemplates\(workspace, number\.id\)/)
-  assert.match(source, /resolveTemplateRecipients\(template, audience\.recipients, body\?\.variable_mappings\)/)
+  assert.match(source, /resolveTemplateRecipients\(template, marketing\.eligible, body\?\.variable_mappings\)/)
 })
 
 test('template send repeats review validation and does not accept a browser recipient list', () => {
