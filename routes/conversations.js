@@ -3,6 +3,7 @@ const router = express.Router()
 const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
 const { sendTextMessage } = require('../lib/whatsapp')
+const { VIEWS, applyView, runBulk } = require('../lib/inboxTriage')
 const { mayResolve } = require('../lib/conversationState')
 const { recordConversationEvent } = require('../lib/conversationEvents')
 const { handoffActiveFlowForConversation } = require('../lib/chatbotExecution')
@@ -53,21 +54,6 @@ async function assertAssignableMember(customerId, userId) {
   return member
 }
 
-async function lastMessages(customerId, conversationIds) {
-  if (!conversationIds.length) return new Map()
-  const { data, error } = await supabase.from('messages')
-    .select('conversation_id,message_body,direction,status,created_at')
-    .eq('customer_id', customerId)
-    .in('conversation_id', conversationIds)
-    .order('created_at', { ascending: false })
-  if (error) throw error
-  const map = new Map()
-  for (const message of data || []) {
-    if (!map.has(message.conversation_id)) map.set(message.conversation_id, message)
-  }
-  return map
-}
-
 router.get('/members', async (req, res) => {
   try {
     const [{ data: workspace, error: workspaceError }, { data: memberships, error: memberError }] = await Promise.all([
@@ -88,34 +74,45 @@ router.get('/members', async (req, res) => {
   }
 })
 
+router.get('/counts', async (req, res) => {
+  try {
+    const entries = await Promise.all(VIEWS.map(async view => {
+      const { count, error } = await applyView(supabase.from('conversations').select('id', { count: 'exact', head: true }).eq('customer_id', req.workspace.customerId), view, req.workspace.userId)
+      if (error) throw error
+      return [view, count || 0]
+    }))
+    return res.json(Object.fromEntries(entries))
+  } catch { return res.status(500).json({ error: 'Unable to load Inbox counts' }) }
+})
+
+router.post('/bulk', async (req, res) => {
+  try {
+    const { status, ...result } = await runBulk({ db: supabase, fields: CONVERSATION_FIELDS, workspace: req.workspace, body: req.body, assertMember: assertAssignableMember, recordEvent: recordConversationEvent })
+    return res.status(status).json(result)
+  } catch { return res.status(400).json({ error: 'Invalid bulk request or team member. Refresh and try again.' }) }
+})
+
 router.get('/', async (req, res) => {
   try {
     const view = String(req.query.view || 'all')
-    if (!['all', 'assigned_to_me', 'unassigned_human'].includes(view)) {
-      return res.status(400).json({ error: 'Conversation view is invalid' })
-    }
-    let query = supabase.from('conversations')
-      .select(CONVERSATION_FIELDS)
+    if (!VIEWS.includes(view)) return res.status(400).json({ error: 'Conversation view is invalid' })
+    const paged = req.query.offset !== undefined
+    const offset = Number(req.query.offset || 0), size = paged ? 50 : 100
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100000) return res.status(400).json({ error: 'Invalid conversation page' })
+    let query = applyView(supabase.from('conversations')
+      .select(CONVERSATION_FIELDS + ',messages(message_body,direction,status,created_at)')
       .eq('customer_id', req.workspace.customerId)
+      .eq('messages.customer_id', req.workspace.customerId)
       .order('last_message_at', { ascending: false, nullsFirst: false })
-      .limit(100)
-
-    // These service-inbox views are derived from the verified caller, never
-    // from a browser-supplied member ID.
-    if (view === 'assigned_to_me') {
-      query = query.eq('assigned_user_id', req.workspace.userId).eq('status', 'open').eq('control_mode', 'human')
-    }
-    if (view === 'unassigned_human') {
-      query = query.is('assigned_user_id', null).eq('status', 'needs_attention').eq('control_mode', 'needs_attention')
-    }
-
+      .order('id', { ascending: false })
+      .order('created_at', { referencedTable: 'messages', ascending: false })
+      .limit(1, { referencedTable: 'messages' }), view, req.workspace.userId)
+    query = paged ? query.range(offset, offset + size) : query.limit(size)
     const { data, error } = await query
     if (error) throw error
-    const previews = await lastMessages(req.workspace.customerId, (data || []).map((conversation) => conversation.id))
-    return res.json((data || []).map((conversation) => ({ ...conversation, last_message: previews.get(conversation.id) || null })))
-  } catch {
-    return res.status(500).json({ error: 'Unable to load conversations' })
-  }
+    const conversations = (data || []).slice(0, size).map(({ messages, ...conversation }) => ({ ...conversation, last_message: messages?.[0] || null }))
+    return res.json(paged ? { conversations, next_offset: (data || []).length > size ? offset + size : null } : conversations)
+  } catch { return res.status(500).json({ error: 'Unable to load conversations' }) }
 })
 
 router.get('/:id', async (req, res) => {
@@ -178,6 +175,7 @@ router.post('/:id/handoff', async (req, res) => {
 
 router.post('/:id/take', async (req, res) => {
   try {
+    const fromAutomation = req.body?.from_automation === true
     const now = new Date().toISOString()
     const { data, error } = await supabase.from('conversations').update({
       status: 'open',
@@ -187,8 +185,8 @@ router.post('/:id/take', async (req, res) => {
       updated_at: now
     }).eq('id', req.params.id)
       .eq('customer_id', req.workspace.customerId)
-      .eq('status', 'needs_attention')
-      .eq('control_mode', 'needs_attention')
+      .eq('status', fromAutomation ? 'open' : 'needs_attention')
+      .eq('control_mode', fromAutomation ? 'automation' : 'needs_attention')
       .or(`assigned_user_id.is.null,assigned_user_id.eq.${req.workspace.userId}`)
       .select(CONVERSATION_FIELDS)
       .maybeSingle()

@@ -21,7 +21,7 @@ function inbox() {
       in() { return q }, order() { return q }, limit() { return q },
       maybeSingle() { single = true; return q },
       then(resolve, reject) {
-        const data = table === 'messages' ? [] : rows.filter(row => filters.every(([field, value]) => row[field] === value))
+        const data = table === 'messages' ? [] : rows.filter(row => filters.every(([field, value]) => field.startsWith('messages.') || row[field] === value))
         return Promise.resolve({ data: single ? data[0] || null : structuredClone(data), error: null }).then(resolve, reject)
       }
     }
@@ -31,6 +31,7 @@ function inbox() {
   const context = { module: { exports: {} }, require(name) {
     if (name === 'express') return { Router: () => router }
     if (name === '../lib/supabase') return supabase
+    if (name === '../lib/inboxTriage') return require('../lib/inboxTriage')
     return {}
   } }
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../routes/conversations.js'), 'utf8'), context)

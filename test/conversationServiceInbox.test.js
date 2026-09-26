@@ -6,14 +6,14 @@ const path = require('node:path')
 const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'conversations.js'), 'utf8')
 
 test('Assigned to Me is derived from the authenticated workspace caller', () => {
-  assert.ok(source.includes("view === 'assigned_to_me'"))
-  assert.ok(source.includes(".eq('assigned_user_id', req.workspace.userId)"))
+  assert.ok(fs.readFileSync(path.join(__dirname,'../lib/inboxTriage.js'),'utf8').includes("view === 'assigned_to_me'"))
+  assert.ok(source.includes('view, req.workspace.userId'))
   assert.equal(source.includes('req.query.user_id'), false)
 })
 
 test('Unassigned service inbox excludes normal automation conversations', () => {
-  assert.ok(source.includes("view === 'unassigned_human'"))
-  assert.ok(source.includes(".eq('status', 'needs_attention').eq('control_mode', 'needs_attention')"))
+  assert.ok(fs.readFileSync(path.join(__dirname,'../lib/inboxTriage.js'),'utf8').includes("view === 'unassigned_human'"))
+  assert.ok(fs.readFileSync(path.join(__dirname,'../lib/inboxTriage.js'),'utf8').includes(".eq('status', 'needs_attention').eq('control_mode', 'needs_attention')"))
 })
 
 test('Take and Reopen assign only the authenticated caller in the active workspace', () => {
