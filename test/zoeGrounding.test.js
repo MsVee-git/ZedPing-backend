@@ -3,14 +3,16 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 const { buildLiveSystem, configuredHandoff, handoffReply, handoffConfirmation, isCustomerSafeReply, hasNaturalTeamTransition, lacksLexicalSupport, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
+const { commercialTurn } = require('../lib/zoeCommercial')
 const webhookSource = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhook.js'), 'utf8')
 
-const agent = { name:'AutoGuard Assistant', zoe_configuration:{ communication_style:'warm', handoff:{ person:true, unknown:true, quote_or_buy:true, phrases:['complaint'] } } }
+const agent = { name:'AutoGuard Assistant', zoe_configuration:{ communication_style:'warm', handoff:{ person:true, unknown:true, quote_or_buy:true, phrases:['complaint'] }, commercial_action:{ type:'quotation', qualification_fields:['product_or_service'], handoff_reason:'Quotation requested' } } }
 const version = { configuration:{ name:'AutoGuard Assistant', configuration:agent.zoe_configuration }, knowledge_snapshot:[{id:'safe-id',name:'Services',text_content:'We provide vehicle servicing and resprays.'}] }
 
-test('explicit human and commercial requests are deterministic handoffs', () => {
+test('explicit human handoffs remain deterministic while configured commercial intent uses its own path', () => {
   assert.equal(configuredHandoff(agent.zoe_configuration, 'Can I speak to someone?'), 'customer_requested_handoff')
-  assert.equal(configuredHandoff(agent.zoe_configuration, 'Can I get a quotation?'), 'commercial_request')
+  assert.equal(configuredHandoff(agent.zoe_configuration, 'Can I get a quotation?'), null)
+  assert.equal(commercialTurn(agent.zoe_configuration, 'Can I get a quotation for a bumper?', [], null).reason, 'quotation_requested')
   assert.equal(configuredHandoff(agent.zoe_configuration, 'This is a complaint'), 'configured_handoff_phrase')
 })
 
@@ -32,7 +34,7 @@ test('deterministic handoff replies are natural and never expose internal termin
   const cases = [
     handoffReply('no_approved_answer', 'How much are tonneau covers?'),
     handoffReply('customer_requested_handoff', 'Can I speak to someone?'),
-    handoffReply('commercial_request', 'Can I get a quotation for a bumper?'),
+    handoffReply('quotation_requested', 'Can I get a quotation for a bumper?'),
     handoffReply('no_approved_answer', 'Will this fit my 2020 Ranger?'),
     handoffReply('no_approved_answer', 'Can you assess my vehicle?')
   ]

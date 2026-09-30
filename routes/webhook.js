@@ -17,6 +17,7 @@ const { selectSoleActiveAgent } = require('../lib/aiAgentSelection')
 const { startFlow, continueFlow } = require('../lib/chatbotExecution')
 const { normalizePhone } = require('../lib/contactImport')
 const { buildLiveSystem, configuredHandoff, handoffReply, handoffConfirmation, isCustomerSafeReply, hasNaturalTeamTransition, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
+const { commercialTurn, commercialMetadata } = require('../lib/zoeCommercial')
 const { mayExecute } = require('../lib/aiDeploymentMode')
 
 router.get('/', (req, res) => {
@@ -330,7 +331,7 @@ async function startLiveZoeSession(ctx) {
   const { data: session, error: sessionError } = await supabase.from('ai_agent_sessions').insert({
     customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, agent_id: agent.id,
     agent_version: version.version, contact_phone: ctx.from, contact_id: ctx.contact.id,
-    conversation_id: ctx.conversation.id, messages: [], status: 'active',
+    conversation_id: ctx.conversation.id, messages: [], commercial_context: null, status: 'active',
     started_at: now.toISOString(), last_activity_at: now.toISOString(),
     expires_at: new Date(now.getTime() + SESSION_IDLE_MS).toISOString()
   }).select().maybeSingle()
@@ -341,7 +342,7 @@ async function startLiveZoeSession(ctx) {
   return runLiveAiTurn(ctx, session, agent, version)
 }
 
-async function transitionAiToHandoff(ctx, session, agent, reason) {
+async function transitionAiToHandoff(ctx, session, agent, reason, commercialContext = null) {
   const now = new Date().toISOString()
   await closeActiveAiSessionsForConversation({
     customerId: ctx.customerId,
@@ -354,7 +355,9 @@ async function transitionAiToHandoff(ctx, session, agent, reason) {
     status: 'needs_attention',
     control_mode: 'needs_attention',
     assigned_user_id: null,
-    handoff_reason: 'Requested by assistant',
+    handoff_reason: reason === 'quotation_requested'
+      ? String(commercialContext?.handoff_reason || 'Quotation requested').trim().slice(0, 120)
+      : 'Requested by assistant',
     handoff_at: now,
     updated_at: now
   }).eq('id', ctx.conversation.id).eq('customer_id', ctx.customerId).select().maybeSingle()
@@ -363,7 +366,11 @@ async function transitionAiToHandoff(ctx, session, agent, reason) {
     customerId: ctx.customerId,
     conversationId: data.id,
     eventType: 'handoff_requested',
-    metadata: { source: 'ai_agent', reason }
+    metadata: {
+      source: 'ai_agent',
+      reason,
+      ...(commercialMetadata(commercialContext) ? { commercial_context:commercialMetadata(commercialContext) } : {})
+    }
   })
 }
 
@@ -374,29 +381,59 @@ async function businessNameForHandoff(ctx, agent) {
   return data?.business_name || agent?.name || 'business'
 }
 
-async function handoffLiveAi(ctx, session, agent, reason, reply) {
-  const confirmation = handoffConfirmation(await businessNameForHandoff(ctx, agent))
+async function handoffLiveAi(ctx, session, agent, reason, reply, commercialContext = null) {
+  const confirmation = handoffConfirmation(await businessNameForHandoff(ctx, agent), reason)
   const supportedReply = String(reply || '').trim()
   const customerMessage = supportedReply ? supportedReply + '\n\n' + confirmation : confirmation
   // Delivery precedes the Team Inbox transition: a successful transition always
   // has exactly one customer-visible final handoff message.  A delivery error is
   // allowed to stop processing rather than risking a duplicate confirmation.
   await outgoing(ctx, customerMessage)
-  await transitionAiToHandoff(ctx, session, agent, reason)
+  await transitionAiToHandoff(ctx, session, agent, reason, commercialContext)
   return true
+}
+
+async function updateLiveSession(ctx, session, { messages, commercialContext }) {
+  const now = new Date()
+  const patch = {
+    updated_at: now.toISOString(),
+    last_activity_at: now.toISOString(),
+    expires_at: new Date(now.getTime() + SESSION_IDLE_MS).toISOString()
+  }
+  if (messages) patch.messages = messages
+  if (commercialContext) patch.commercial_context = commercialContext
+  const { data, error } = await supabase.from('ai_agent_sessions').update(patch)
+    .eq('id', session.id).eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).eq('status', 'active').select().maybeSingle()
+  if (error) throw error
+  if (!data) throw new Error('AI session changed before it could be updated')
+  return data
 }
 
 async function runLiveAiTurn(ctx, session, agent, version) {
   const live = buildLiveSystem(agent, version, ctx.body)
   let handoffStarted = false
-  const handoff = async (reason, reply) => {
+  const handoff = async (reason, reply, commercialContext = null) => {
     handoffStarted = true
-    return handoffLiveAi(ctx, session, agent, reason, reply)
+    return handoffLiveAi(ctx, session, agent, reason, reply, commercialContext)
   }
+  const history = boundedHistory([...(session.messages || []), { role: 'user', content: ctx.body }])
+  const commercial = commercialTurn(live.configuration, ctx.body, history.slice(0, -1), session.commercial_context)
+  if (commercial?.kind === 'qualify') {
+    await outgoing(ctx, commercial.reply)
+    const messages = boundedHistory([...history, { role: 'assistant', content: commercial.reply }])
+    await updateLiveSession(ctx, session, { messages, commercialContext:commercial.context })
+    await recordAiExecutionEvent(supabase, {
+      customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
+      agentVersion: session.agent_version, model: BETA_MODEL, outcome: 'replied', executionMode: 'live',
+      retrievalItemIds: live.knowledge.map(item => item.id)
+    }).catch(() => {})
+    return true
+  }
+  if (commercial?.kind === 'handoff') return handoff(commercial.reason, handoffReply(commercial.reason, ctx.body), commercial.context)
+
   const configured = configuredHandoff(live.configuration, ctx.body)
   if (configured) return handoff(configured, handoffReply(configured, ctx.body))
 
-  const history = boundedHistory([...(session.messages || []), { role: 'user', content: ctx.body }])
   const started = Date.now()
   try {
     const completion = await getAICompletion(live.prompt, history, null)
@@ -417,13 +454,8 @@ async function runLiveAiTurn(ctx, session, agent, version) {
     const reply = candidate
     if (!reply) throw new Error('AI response was empty')
     await outgoing(ctx, reply)
-    const now = new Date()
     const nextHistory = boundedHistory([...history, { role: 'assistant', content: reply }])
-    const { error: updateError } = await supabase.from('ai_agent_sessions').update({
-      messages: nextHistory, updated_at: now.toISOString(), last_activity_at: now.toISOString(),
-      expires_at: new Date(now.getTime() + SESSION_IDLE_MS).toISOString()
-    }).eq('id', session.id).eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id).eq('status', 'active')
-    if (updateError) throw updateError
+    await updateLiveSession(ctx, session, { messages:nextHistory })
     await recordAiExecutionEvent(supabase, {
       customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
       agentVersion: session.agent_version, model: completion.model, outcome: 'replied', executionMode: 'live',

@@ -6,8 +6,8 @@ const path = require('node:path')
 const routeSource = fs.readFileSync(path.join(__dirname, '..', 'routes', 'aiAgents.js'), 'utf8')
 const migrationSource = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20260930093000_atomic_ai_agent_activation.sql'), 'utf8')
 
-function routeBody(pathname) {
-  const marker = `router.post('${pathname}'`
+function routeBody(pathname, method = 'post') {
+  const marker = `router.${method}('${pathname}'`
   const start = routeSource.indexOf(marker)
   assert.notEqual(start, -1, `route ${pathname} exists`)
   const next = routeSource.indexOf('\nrouter.', start + marker.length)
@@ -72,4 +72,13 @@ test('activation responses expose a finalized version and timestamp rather than 
     assert.match(body, /activated_configuration_version:result\.version/)
     assert.match(body, /changes_not_live_yet:false/)
   }
+})
+
+test('active agents can save draft-only changes for Update Live without changing the bound runtime number', () => {
+  const draftRoute = routeBody('/:id/draft', 'patch')
+  assert.match(draftRoute, /\['draft','paused','active'\]\.includes\(current\.lifecycle_status\)/)
+  assert.match(draftRoute, /current\.lifecycle_status === 'active' && number\.id !== current\.whatsapp_number_id/)
+  assert.match(draftRoute, /lifecycle_status:current\.lifecycle_status/)
+  assert.match(draftRoute, /is_active:current\.lifecycle_status === 'active'/)
+  assert.match(draftRoute, /configuration_version:Number\(current\.configuration_version \|\| 1\)\+1/)
 })

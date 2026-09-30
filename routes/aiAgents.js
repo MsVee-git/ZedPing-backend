@@ -6,6 +6,7 @@ const { BETA_MODEL, boundedHistory, estimateCostUsd } = require('../lib/aiRuntim
 const { getAICompletion } = require('../lib/openai')
 const { normalizePhone } = require('../lib/contactImport')
 const { buildLiveSystem, configuredHandoff, handoffReply, removeHandoffMarker, requestsModelHandoff, isCustomerSafeReply, hasNaturalTeamTransition } = require('../lib/zoeGrounding')
+const { normaliseCommercialAction, commercialTurn } = require('../lib/zoeCommercial')
 const { knowledgeSnapshot, draftDiffersFromActivated, resolveEligibleKnowledge } = require('../lib/aiAgentKnowledge')
 const { deploymentMode, isActiveAgent, mayGoLive, mayReturnToTest } = require('../lib/aiDeploymentMode')
 
@@ -80,8 +81,9 @@ function readConfig(body) {
   if (!STYLES.has(style)) throw new Error('Communication style is invalid')
   const handoff = body?.handoff && typeof body.handoff === 'object' && !Array.isArray(body.handoff) ? body.handoff : {}
   const phrases = Array.isArray(handoff.phrases) ? [...new Set(handoff.phrases.map(value => cleanText(value, 'Escalation phrase', 100)).filter(Boolean))].slice(0, 5) : []
+  const commercialAction = normaliseCommercialAction(body?.commercial_action)
   return { template, name, agentType:TYPES.has(body?.agent_type) ? body.agent_type : (template.key === 'sales_interest' ? 'sales' : template.key === 'static_availability' ? 'booking' : 'support'),
-    configuration:{ communication_style:style, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases }, knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
+    configuration:{ communication_style:style, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases }, ...(commercialAction ? { commercial_action:commercialAction } : {}), knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
 }
 function buildSystem(agent, knowledge, question) {
   return buildLiveSystem(agent, { configuration:activatedConfiguration(agent), knowledge_snapshot:knowledgeSnapshot(knowledge) }, question).prompt
@@ -90,9 +92,8 @@ function wouldHandoff(config, messages, hasKnowledge) {
   const last = String(messages[messages.length - 1]?.content || '').toLowerCase()
   const handoff = config?.handoff || {}
   const person = handoff.person !== false && /\b(person|human|agent|representative|someone)\b/.test(last)
-  const commercial = handoff.quote_or_buy !== false && /\b(quote|buy|purchase|order|book|booking)\b/.test(last)
   const phrase = (handoff.phrases || []).some(value => last.includes(String(value).toLowerCase()))
-  return person || commercial || phrase || (handoff.unknown !== false && !hasKnowledge)
+  return person || phrase || (handoff.unknown !== false && !hasKnowledge)
 }
 async function knowledgeForAgent(customerId, agentId, withText = false) {
   const { data, error } = await supabase.from('ai_agent_knowledge_items').select('content_library_item_id').eq('customer_id', customerId).eq('agent_id', agentId).order('created_at')
@@ -178,15 +179,20 @@ router.post('/drafts', requireAdmin, async (req,res) => {
 router.patch('/:id/draft', requireAdmin, async (req,res) => {
   try {
     const current = await agentForWorkspace(req.workspace.customerId, req.params.id)
-    if (current.lifecycle_status !== 'draft' && current.lifecycle_status !== 'paused') throw new Error('Pause an active AI Agent before editing its configuration')
+    if (!['draft','paused','active'].includes(current.lifecycle_status)) throw new Error('Only a draft, paused, or active AI Agent can be edited')
     const input = readConfig(req.body)
     const number = await workspaceNumber(req.workspace.customerId, req.body?.whatsapp_number_id || current.whatsapp_number_id)
+    // Live routing selects an agent by its bound number before loading the
+    // immutable activated version. Letting an active draft change that binding
+    // would silently move old live behavior to another number, so it remains a
+    // pause-and-review operation.
+    if (current.lifecycle_status === 'active' && number.id !== current.whatsapp_number_id) throw new Error('Pause the active AI Agent before changing its WhatsApp number')
     const knowledge = await selectedKnowledge(req.workspace.customerId, req.body?.knowledge_item_ids)
     const { data:agent,error } = await supabase.from('ai_agents').update({
       name:input.name, agent_type:input.agentType, whatsapp_number_id:number.id, zoe_template_key:input.template.key,
       zoe_configuration:input.configuration,
-      lifecycle_status:current.lifecycle_status === 'paused' ? 'paused' : 'draft',
-      is_active:false, configuration_version:Number(current.configuration_version || 1)+1
+      lifecycle_status:current.lifecycle_status,
+      is_active:current.lifecycle_status === 'active', configuration_version:Number(current.configuration_version || 1)+1
     }).eq('id',current.id).eq('customer_id',req.workspace.customerId).select().single()
     if (error) throw error
     await replaceKnowledge(req.workspace.customerId,agent.id,knowledge)
@@ -209,12 +215,15 @@ router.post('/:id/test', requireAdmin, async (req,res) => {
     const knowledge=await knowledgeForAgent(req.workspace.customerId,agent.id,true)
     const prompt=buildSystem(agent,knowledge,messages[messages.length-1].content)
     const completion=await getAICompletion(prompt,messages,null)
-    const requestedReason=configuredHandoff(agent.zoe_configuration, messages[messages.length-1]?.content)
+    const commercial = commercialTurn(agent.zoe_configuration, messages[messages.length-1]?.content, messages.slice(0,-1), null)
+    const requestedReason=configuredHandoff(agent.zoe_configuration, messages[messages.length-1]?.content) || (commercial?.kind === 'handoff' ? commercial.reason : null)
     const candidate=removeHandoffMarker(completion.text)
     const modelRequestedHandoff=agent.zoe_configuration?.handoff?.unknown !== false && requestsModelHandoff(completion.text)
     const handoffReason=requestedReason || (modelRequestedHandoff ? 'no_approved_answer' : null)
     const handoff=Boolean(handoffReason)
-    const reply=requestedReason
+    const reply=commercial?.kind === 'qualify'
+      ? commercial.reply
+      : requestedReason
       ? handoffReply(requestedReason)
       : modelRequestedHandoff && (!isCustomerSafeReply(candidate) || !hasNaturalTeamTransition(candidate))
         ? handoffReply('no_approved_answer', messages[messages.length-1]?.content)

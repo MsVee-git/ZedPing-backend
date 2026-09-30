@@ -18,11 +18,11 @@ test('brevity preserves snapshot facts and safety rather than cutting generated 
 test('handoff remains explicit, concise and customer-facing without a timing promise', () => {
   const confirmation = handoffConfirmation('Example Motors')
   assert.equal(confirmation, "I'll hand you over to the Example Motors team for further assistance. Please stay available here on WhatsApp.")
-  for (const [reason, question] of [['commercial_request', 'I need a quotation'], ['commercial_request', 'I want to buy'], ['customer_requested_handoff', 'A person please'], ['no_approved_answer', 'What is the price?']]) {
+  for (const [reason, question] of [['quotation_requested', 'I need a quotation'], ['customer_requested_handoff', 'A person please'], ['no_approved_answer', 'What is the price?']]) {
     const response = handoffReply(reason, question) + '\n\n' + confirmation
     assert.equal(isCustomerSafeReply(response), true)
     assert.ok(response.split(/\s+/).length <= 40)
     assert.doesNotMatch(response, /\bhandoff\b|escalation|AI agent|knowledge base|grounding|within|shortly/i)
   }
-  assert.equal(configuredHandoff(version.configuration.configuration, 'I need a quotation'), 'commercial_request')
+  assert.equal(configuredHandoff(version.configuration.configuration, 'I need a quotation'), null)
 })
