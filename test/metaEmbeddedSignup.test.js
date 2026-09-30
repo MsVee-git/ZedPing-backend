@@ -63,6 +63,14 @@ test('requires Meta webhook subscription confirmation before a connection can su
   await assert.rejects(() => client.subscribeApp('100'), MetaSignupError)
 })
 
+test('registers a verified phone with a six-digit PIN without emitting it in diagnostics', async () => {
+  const diagnostics = []; const calls = []
+  const client = createMetaEmbeddedSignupClient({ env, diagnostic: record => diagnostics.push(record), http: { async post(url, body) { calls.push({ url, body }); return { data: { success: true } } } } })
+  await client.registerPhone('20000', 'token-not-for-output', '123456')
+  assert.deepEqual(calls[0].body, { messaging_product: 'whatsapp', pin: '123456' })
+  assert.equal(JSON.stringify(diagnostics).includes('123456'), false)
+})
+
 
 test('emits stage diagnostics without access tokens or raw Meta responses', async () => {
   const diagnostics = []
@@ -251,7 +259,7 @@ function transactionDiagnosticClient({ finishWabaId, phoneLists }) {
             }
           }
         }
-        const wabaId = url.match(/v18\\.0\\/([0-9]+)\\/phone_numbers/)[1]
+        const wabaId = url.match(/v18\.0\/([0-9]+)\/phone_numbers/)[1]
         return { data: { data: phoneLists[wabaId] || [] } }
       }
     }
