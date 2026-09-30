@@ -5,8 +5,8 @@ const path = require('node:path')
 
 test('AI management is workspace-protected and owner/admin-only', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'aiAgents.js'), 'utf8')
-  assert.ok(source.includes('router.post(\'/\', requireAdmin'))
-  assert.ok(source.includes('router.patch(\'/:id\', requireAdmin'))
+  assert.ok(source.includes('router.post(\'/drafts\', requireAdmin'))
+  assert.ok(source.includes('router.patch(\'/:id/draft\', requireAdmin'))
   assert.ok(source.includes(".eq('customer_id', req.workspace.customerId)"))
   assert.equal(source.includes('req.body.customer_id'), false)
   assert.equal(source.includes('req.body.model'), false)

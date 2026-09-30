@@ -12,10 +12,14 @@ test('editable draft knowledge excludes archived and non-Text items', () => {
 })
 
 
-test('activated knowledge snapshots keep their original text after shared content is edited', () => {
+test('activated knowledge snapshots keep complete chunked source text after shared content is edited', () => {
   const { knowledgeSnapshot } = require('../lib/aiAgentKnowledge')
   const source = [{ id: 'content-a', name: 'Offers', text_content: 'Roll bar K6,500', content_type: 'TEXT', archived_at: null }]
   const frozen = knowledgeSnapshot(source)
   source[0].text_content = 'Roll bar K6,200'
-  assert.deepEqual(frozen, [{ id: 'content-a', name: 'Offers', text_content: 'Roll bar K6,500' }])
+  assert.equal(frozen.length, 1)
+  assert.equal(frozen[0].id, 'content-a')
+  assert.equal(frozen[0].source_content_item_id, 'content-a')
+  assert.equal(frozen[0].chunk_id, 'content-a:text:1')
+  assert.equal(frozen[0].text_content, 'Roll bar K6,500')
 })

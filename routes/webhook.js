@@ -387,7 +387,7 @@ async function handoffLiveAi(ctx, session, agent, reason, reply) {
 }
 
 async function runLiveAiTurn(ctx, session, agent, version) {
-  const live = buildLiveSystem(agent, version)
+  const live = buildLiveSystem(agent, version, ctx.body)
   let handoffStarted = false
   const handoff = async (reason, reply) => {
     handoffStarted = true
