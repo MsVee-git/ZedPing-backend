@@ -235,9 +235,10 @@ router.post('/:id/archive',requireAdmin,async(req,res)=>{
     res.json({agent:safeAgent(data)})
   } catch(error){res.status(400).json({error:error.message||'Unable to archive AI Agent'})}
 })
-async function liveReadiness(customerId, agent) {
+async function activationReadiness(customerId, agent, { allowActiveUpdate = false } = {}) {
   if (!agent.name?.trim()) throw new Error('Set a customer-facing assistant name before activation')
-  if (agent.lifecycle_status !== 'draft' && agent.lifecycle_status !== 'paused') throw new Error('Only draft or paused AI Agents can be activated')
+  const mayActivate = agent.lifecycle_status === 'draft' || agent.lifecycle_status === 'paused' || (allowActiveUpdate && isActiveAgent(agent))
+  if (!mayActivate) throw new Error(allowActiveUpdate ? 'Only an active AI Agent can update its live configuration' : 'Only draft or paused AI Agents can be activated')
   await workspaceNumber(customerId, agent.whatsapp_number_id)
   const knowledge = await knowledgeForAgent(customerId, agent.id, true)
   const links = await selectedKnowledge(customerId, knowledge.map(item => item.id))
@@ -254,6 +255,56 @@ async function liveReadiness(customerId, agent) {
   if (testError) throw testError
   if (!(tests || []).length) throw new Error('Add at least one approved test contact before controlled activation')
   return knowledge
+}
+
+async function activateCurrentConfiguration(customerId, agent, userId, { allowActiveUpdate = false } = {}) {
+  const knowledge = await activationReadiness(customerId, agent, { allowActiveUpdate })
+  const existingActivated = await activatedVersionForAgent(customerId, agent)
+  if (allowActiveUpdate && isActiveAgent(agent) && !changesNotLiveYet(agent, knowledge, existingActivated)) {
+    return { agent, knowledge, version:existingActivated.version, activatedAt:existingActivated.activated_at, alreadyCurrent:true }
+  }
+
+  const snapshot = knowledgeSnapshot(knowledge)
+  if (!snapshot.length) throw new Error('Select at least one eligible approved knowledge item before activation')
+  const targetMode = allowActiveUpdate && isActiveAgent(agent) ? deploymentMode(agent) : 'test'
+  const { data, error } = await supabase.rpc('activate_ai_agent_version', {
+    p_customer_id:customerId,
+    p_agent_id:agent.id,
+    p_expected_configuration_version:Number(agent.configuration_version || 1),
+    p_expected_lifecycle_status:agent.lifecycle_status,
+    p_target_deployment_mode:targetMode,
+    p_configuration:activatedConfiguration(agent),
+    p_knowledge_snapshot:snapshot,
+    p_created_by:userId
+  })
+  if (error) {
+    // A concurrent identical Update Live may lose the optimistic version check
+    // after the other request has already committed the same draft. Treat only
+    // that completed state as idempotent; all other activation errors surface.
+    if (allowActiveUpdate && error.code === '40001') {
+      const refreshed = await agentForWorkspace(customerId, agent.id)
+      const refreshedVersion = await activatedVersionForAgent(customerId, refreshed)
+      const refreshedKnowledge = await knowledgeForAgent(customerId, refreshed.id, true)
+      if (isActiveAgent(refreshed) && refreshedVersion && !changesNotLiveYet(refreshed, refreshedKnowledge, refreshedVersion)) {
+        return {
+          agent:refreshed,
+          knowledge:refreshedKnowledge,
+          version:refreshedVersion.version,
+          activatedAt:refreshedVersion.activated_at,
+          alreadyCurrent:true
+        }
+      }
+    }
+    throw error
+  }
+  const activated = Array.isArray(data) ? data[0] : data
+  if (!activated || !Number.isInteger(Number(activated.version)) || !activated.activated_at) throw new Error('AI Agent activation did not produce an immutable version')
+  const { data:updated, error:updatedError } = await supabase.from('ai_agents').select('*')
+    .eq('id',agent.id).eq('customer_id',customerId).eq('lifecycle_status','active').eq('is_active',true)
+    .eq('configuration_version',Number(activated.version)).maybeSingle()
+  if (updatedError) throw updatedError
+  if (!updated) throw new Error('AI Agent activation did not finalize')
+  return { agent:updated, knowledge, version:Number(activated.version), activatedAt:activated.activated_at, alreadyCurrent:false }
 }
 
 router.get('/:id/test-contacts', requireAdmin, async (req,res) => {
@@ -294,7 +345,7 @@ router.delete('/:id/test-contacts/:contactId', requireAdmin, async (req,res) => 
 router.get('/:id/readiness', requireAdmin, async (req,res) => {
   try {
     const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
-    const knowledge = await liveReadiness(req.workspace.customerId, agent)
+    const knowledge = await activationReadiness(req.workspace.customerId, agent)
     res.json({ready:true, assistant_name:agent.name, whatsapp_number_id:agent.whatsapp_number_id, knowledge_sources:knowledge.map(item=>item.name), handoff:agent.zoe_configuration?.handoff || {}})
   } catch(error) { res.status(400).json({ready:false,error:error.message || 'This AI Agent is not ready'}) }
 })
@@ -302,24 +353,15 @@ router.get('/:id/readiness', requireAdmin, async (req,res) => {
 router.post('/:id/activate', requireAdmin, async (req,res) => {
   try {
     const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
-    const knowledge = await liveReadiness(req.workspace.customerId, agent)
-    const version = Number(agent.configuration_version || 1) + 1
-    const snapshotConfig = activatedConfiguration(agent)
-    const snapshot = knowledgeSnapshot(knowledge)
-    // Create the immutable configuration before making it live. If the later lifecycle
-    // compare-and-set loses a race, the harmless unreferenced snapshot remains inactive.
-    const { error: versionError } = await supabase.from('ai_agent_configuration_versions').insert({
-      customer_id:req.workspace.customerId, agent_id:agent.id, version, configuration:snapshotConfig,
-      knowledge_snapshot:snapshot, activated_at:new Date().toISOString(), created_by:req.workspace.userId
+    const result = await activateCurrentConfiguration(req.workspace.customerId, agent, req.workspace.userId)
+    res.json({
+      agent:safeAgent(result.agent,result.knowledge.map(({text_content,...safe})=>safe),{
+        activated_configuration_version:result.version,
+        changes_not_live_yet:false
+      }),
+      status:'active',
+      activation:{version:result.version,activated_at:result.activatedAt}
     })
-    if (versionError) throw versionError
-    const { data, error } = await supabase.from('ai_agents').update({
-      lifecycle_status:'active', is_active:true, deployment_mode:'test', configuration_version:version, archived_at:null, archive_reason:null
-    }).eq('id',agent.id).eq('customer_id',req.workspace.customerId)
-      .eq('lifecycle_status',agent.lifecycle_status).eq('configuration_version',agent.configuration_version).select().maybeSingle()
-    if (error) throw error
-    if (!data) throw new Error('AI Agent changed before activation; review it again') 
-    res.json({agent:safeAgent(data,knowledge.map(({text_content,...safe})=>safe)), status:'active'})
   } catch(error) { res.status(error?.code === '23505' ? 409 : 400).json({error:error.message || 'Unable to activate AI Agent'}) }
 })
 
@@ -331,6 +373,22 @@ async function activatedVersionForAgent(customerId, agent) {
   if (error) throw error
   return data || null
 }
+
+router.post('/:id/update-live', requireAdmin, async (req,res) => {
+  try {
+    const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
+    if (!isActiveAgent(agent)) throw new Error('Only an active AI Agent can update its live configuration')
+    const result = await activateCurrentConfiguration(req.workspace.customerId, agent, req.workspace.userId, { allowActiveUpdate:true })
+    res.json({
+      agent:safeAgent(result.agent,result.knowledge.map(({text_content,...safe})=>safe),{
+        activated_configuration_version:result.version,
+        changes_not_live_yet:false
+      }),
+      status:deploymentMode(result.agent),
+      activation:{version:result.version,activated_at:result.activatedAt,already_current:result.alreadyCurrent}
+    })
+  } catch(error) { res.status(error?.code === '23505' ? 409 : 400).json({error:error.message || 'Unable to update the live AI Agent'}) }
+})
 
 router.post('/:id/resume', requireAdmin, async (req,res) => {
   try {
