@@ -77,6 +77,23 @@ function publicReplyMessage(reply) {
   return { id: reply.id, direction: reply.direction, message_body: reply.message_body || null, status: reply.status || null, created_at: reply.created_at || null, inbound_media: publicInboundMedia(reply.inbound_media), outbound_media: publicMessageMedia(reply.outbound_media) }
 }
 
+function safeDiagnosticCode(error) {
+  const value = String(error?.code || error?.status || error?.name || 'unknown')
+  return /^[A-Za-z0-9_:-]{1,64}$/.test(value) ? value : 'unknown'
+}
+
+function logConversationDetailFailure(req, stage, error) {
+  // Keep this useful in Railway without recording request data, message data,
+  // credentials, or raw upstream error text.
+  console.error(JSON.stringify({
+    event: 'conversation_detail_load_failed',
+    stage,
+    workspace_id: req.workspace?.customerId || null,
+    conversation_id: req.params?.id || null,
+    error_code: safeDiagnosticCode(error)
+  }))
+}
+
 async function mediaAccessToken(number) {
   try {
     const vault = createCredentialVault()
@@ -172,9 +189,23 @@ router.get('/', async (req, res) => {
 })
 
 router.get('/:id', async (req, res) => {
+  let stage = 'authorization_workspace_resolution'
   try {
+    if (!req.workspace?.customerId) {
+      const error = new Error('Workspace is unavailable')
+      error.code = 'WORKSPACE_UNAVAILABLE'
+      throw error
+    }
+    stage = 'conversation_lookup'
     const conversation = await getConversation(req.workspace.customerId, req.params.id)
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' })
+    stage = 'whatsapp_number_resolution'
+    if (!conversation.whatsapp_number_id) {
+      const error = new Error('Conversation WhatsApp number is unavailable')
+      error.code = 'CONVERSATION_NUMBER_UNAVAILABLE'
+      throw error
+    }
+    stage = 'normal_messages_query'
     const { data: messages, error } = await supabase.from('messages')
       .select('id,direction,to_number,from_number,message_body,status,created_at,meta_message_id,inbound_media,outbound_media,reply_to_message_id')
       .eq('customer_id', req.workspace.customerId)
@@ -185,6 +216,7 @@ router.get('/:id', async (req, res) => {
     const replyIds = [...new Set((messages || []).map(message => message.reply_to_message_id).filter(Boolean))]
     let repliesById = new Map()
     if (replyIds.length) {
+      stage = 'reply_parent_lookup'
       const { data: replies, error: replyError } = await supabase.from('messages')
         .select('id,direction,message_body,status,created_at,inbound_media,outbound_media')
         .eq('customer_id', req.workspace.customerId)
@@ -194,10 +226,28 @@ router.get('/:id', async (req, res) => {
       if (replyError) throw replyError
       repliesById = new Map((replies || []).map(reply => [reply.id, reply]))
     }
-    return res.json({ conversation, messages: (messages || []).map(({ inbound_media, outbound_media, reply_to_message_id, ...message }) => ({
-      ...message, inbound_media: publicInboundMedia(inbound_media), outbound_media: publicMessageMedia(outbound_media), reply_to: publicReplyMessage(repliesById.get(reply_to_message_id))
-    })) })
-  } catch {
+    const publicMessages = (messages || []).map(({ inbound_media, outbound_media, reply_to_message_id, ...message }) => {
+      let publicInbound, publicOutbound
+      try {
+        publicInbound = publicInboundMedia(inbound_media)
+        publicOutbound = publicMessageMedia(outbound_media)
+      } catch (error) {
+        stage = 'rich_media_transformation'
+        throw error
+      }
+      let replyTo
+      try {
+        replyTo = publicReplyMessage(repliesById.get(reply_to_message_id))
+      } catch (error) {
+        stage = 'reply_preview_construction'
+        throw error
+      }
+      return { ...message, inbound_media: publicInbound, outbound_media: publicOutbound, reply_to: replyTo }
+    })
+    stage = 'final_response_construction'
+    return res.json({ conversation, messages: publicMessages })
+  } catch (error) {
+    logConversationDetailFailure(req, stage, error)
     return res.status(500).json({ error: 'Unable to load this conversation' })
   }
 })

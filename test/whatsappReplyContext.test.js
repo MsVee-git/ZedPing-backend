@@ -55,8 +55,18 @@ test('resolution and AI paths are explicitly tenant, number, conversation and id
   assert.match(conversations, /reply_to_message_id/)
   assert.match(conversations, /const replyIds =/)
   assert.match(conversations, /\.in\('id', replyIds\)/)
-  assert.match(conversations, /reply_to: publicReplyMessage\(repliesById\.get\(reply_to_message_id\)\)/)
+  assert.match(conversations, /replyTo = publicReplyMessage\(repliesById\.get\(reply_to_message_id\)\)/)
+  assert.match(conversations, /reply_to: replyTo/)
   assert.doesNotMatch(conversations, /messages!messages_reply_to_message_id_fkey/)
+})
+
+test('conversation-detail diagnostics identify a safe failure stage without serializing request or message secrets', () => {
+  const conversations = fs.readFileSync(path.join(__dirname, '..', 'routes', 'conversations.js'), 'utf8')
+  const diagnostics = conversations.slice(conversations.indexOf('function safeDiagnosticCode'), conversations.indexOf('async function mediaAccessToken'))
+  assert.match(diagnostics, /conversation_detail_load_failed/)
+  for (const stage of ['authorization_workspace_resolution', 'conversation_lookup', 'whatsapp_number_resolution', 'normal_messages_query', 'reply_parent_lookup', 'rich_media_transformation', 'reply_preview_construction', 'final_response_construction']) assert.match(conversations, new RegExp(`'${stage}'`))
+  assert.match(diagnostics, /error_code: safeDiagnosticCode\(error\)/)
+  assert.doesNotMatch(diagnostics, /error\.message|access_token|authorization|meta_message_id|message_body/)
 })
 
 test('quote context remains reference context, not a knowledge authorization bypass', () => {
