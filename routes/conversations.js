@@ -176,13 +176,26 @@ router.get('/:id', async (req, res) => {
     const conversation = await getConversation(req.workspace.customerId, req.params.id)
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' })
     const { data: messages, error } = await supabase.from('messages')
-      .select('id,direction,to_number,from_number,message_body,status,created_at,meta_message_id,inbound_media,outbound_media,reply_to:messages!messages_reply_to_message_id_fkey(id,direction,message_body,status,created_at,inbound_media,outbound_media)')
+      .select('id,direction,to_number,from_number,message_body,status,created_at,meta_message_id,inbound_media,outbound_media,reply_to_message_id')
       .eq('customer_id', req.workspace.customerId)
+      .eq('whatsapp_number_id', conversation.whatsapp_number_id)
       .eq('conversation_id', conversation.id)
       .order('created_at', { ascending: true })
     if (error) throw error
-    return res.json({ conversation, messages: (messages || []).map(({ inbound_media, outbound_media, reply_to, ...message }) => ({
-      ...message, inbound_media: publicInboundMedia(inbound_media), outbound_media: publicMessageMedia(outbound_media), reply_to: publicReplyMessage(reply_to)
+    const replyIds = [...new Set((messages || []).map(message => message.reply_to_message_id).filter(Boolean))]
+    let repliesById = new Map()
+    if (replyIds.length) {
+      const { data: replies, error: replyError } = await supabase.from('messages')
+        .select('id,direction,message_body,status,created_at,inbound_media,outbound_media')
+        .eq('customer_id', req.workspace.customerId)
+        .eq('whatsapp_number_id', conversation.whatsapp_number_id)
+        .eq('conversation_id', conversation.id)
+        .in('id', replyIds)
+      if (replyError) throw replyError
+      repliesById = new Map((replies || []).map(reply => [reply.id, reply]))
+    }
+    return res.json({ conversation, messages: (messages || []).map(({ inbound_media, outbound_media, reply_to_message_id, ...message }) => ({
+      ...message, inbound_media: publicInboundMedia(inbound_media), outbound_media: publicMessageMedia(outbound_media), reply_to: publicReplyMessage(repliesById.get(reply_to_message_id))
     })) })
   } catch {
     return res.status(500).json({ error: 'Unable to load this conversation' })

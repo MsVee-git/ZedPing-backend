@@ -52,7 +52,11 @@ test('resolution and AI paths are explicitly tenant, number, conversation and id
   assert.match(webhook, /claimInboundEvent\(ctx\)/)
   assert.match(conversations, /resolveOutgoingReplyContext/)
   assert.match(conversations, /\.eq\('conversation_id', conversation\.id\)/)
-  assert.match(conversations, /messages!messages_reply_to_message_id_fkey/)
+  assert.match(conversations, /reply_to_message_id/)
+  assert.match(conversations, /const replyIds =/)
+  assert.match(conversations, /\.in\('id', replyIds\)/)
+  assert.match(conversations, /reply_to: publicReplyMessage\(repliesById\.get\(reply_to_message_id\)\)/)
+  assert.doesNotMatch(conversations, /messages!messages_reply_to_message_id_fkey/)
 })
 
 test('quote context remains reference context, not a knowledge authorization bypass', () => {

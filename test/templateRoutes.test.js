@@ -21,3 +21,10 @@ test('rich template routes remain owner/admin-only and workspace scoped', () => 
   assert.doesNotMatch(source, /body\.access_token/i)
   assert.doesNotMatch(source, /body\.components/i)
 })
+
+test('template test-send is independent of reply-context relationships', () => {
+  assert.match(source, /router\.post\('\/send', requireAdmin, parseTemplateUpload/)
+  assert.match(source, /await sendTemplateMessage\(/)
+  assert.match(source, /meta_message_id: metaMessageId/)
+  assert.doesNotMatch(source, /reply_to_message_id|replyContext|messages!messages_reply_to_message_id_fkey/)
+})
