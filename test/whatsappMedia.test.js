@@ -1,6 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { fetchWhatsAppImage, safeMetaMediaUrl, WhatsAppMediaError } = require('../lib/whatsappMedia')
+const { fetchWhatsAppImage, fetchWhatsAppMedia, safeMetaMediaUrl, WhatsAppMediaError } = require('../lib/whatsappMedia')
 
 test('retrieves an image only through a Meta-approved URL with server credentials', async () => {
   const calls = []
@@ -23,4 +23,13 @@ test('rejects non-Meta media redirects and expired media without fetching arbitr
   const http = { get: async () => { calls++; return { data: { url: 'https://example.invalid/file', mime_type: 'image/jpeg' } } } }
   await assert.rejects(() => fetchWhatsAppImage({ mediaId: '1234567890', accessToken: 'server-only-token', http }), WhatsAppMediaError)
   assert.equal(calls, 1)
+})
+
+test('retrieves a document only through the same authenticated proxy boundary', async () => {
+  const http = { get: async (url) => url.includes('graph.facebook.com')
+    ? { data: { url: 'https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=456', mime_type: 'application/pdf' } }
+    : { data: Buffer.from('%PDF-1.7') } }
+  const media = await fetchWhatsAppMedia({ mediaId: '1234567890', accessToken: 'server-only-token', expectedType: 'document', http })
+  assert.equal(media.mimeType, 'application/pdf')
+  await assert.rejects(() => fetchWhatsAppMedia({ mediaId: '1234567890', accessToken: 'server-only-token', expectedType: 'image', http }), WhatsAppMediaError)
 })

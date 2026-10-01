@@ -1,17 +1,31 @@
 const express = require('express')
+const multer = require('multer')
 const router = express.Router()
 const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
-const { sendTextMessage } = require('../lib/whatsapp')
+const { sendTextMessage, sendImageMessage, sendDocumentMessage, sendLocationMessage, uploadWhatsAppMedia } = require('../lib/whatsapp')
 const { VIEWS, applyView, runBulk } = require('../lib/inboxTriage')
 const { mayResolve } = require('../lib/conversationState')
 const { recordConversationEvent } = require('../lib/conversationEvents')
 const { handoffActiveFlowForConversation } = require('../lib/chatbotExecution')
 const { closeActiveAiSessionsForConversation } = require('../lib/aiAgentSessions')
 const { createCredentialVault, CredentialVaultError } = require('../lib/credentialVault')
-const { storedInboundImage, publicInboundMedia } = require('../lib/inboundMedia')
-const { fetchWhatsAppImage, WhatsAppMediaError } = require('../lib/whatsappMedia')
+const { storedInboundAttachment, publicInboundMedia } = require('../lib/inboundMedia')
+const { fetchWhatsAppMedia, WhatsAppMediaError } = require('../lib/whatsappMedia')
 const { configuredAccessToken } = require('../lib/whatsapp')
+const { validateOutboundUpload, parseLocation, storedAttachment, publicMessageMedia } = require('../lib/conversationMedia')
+
+function parseConversationUpload(req, res, next) {
+  // Some isolated route tests intentionally provide a no-op multer shim. The
+  // production dependency always exposes memoryStorage; defer construction so
+  // that importing unrelated Inbox handlers does not depend on upload setup.
+  if (typeof multer.memoryStorage !== 'function') return next()
+  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } })
+  upload.single('file')(req, res, error => {
+    if (error) return res.status(400).json({ error: 'Attachment must be one file up to 10 MB' })
+    next()
+  })
+}
 
 const CONVERSATION_FIELDS = 'id, customer_id, whatsapp_number_id, contact_id, status, control_mode, assigned_user_id, handoff_reason, handoff_at, taken_over_at, resolved_at, resolved_by_user_id, last_message_at, last_inbound_at, last_outbound_at, unread_count, created_at, updated_at, contacts(id,name,phone_number,tag,marketing_opted_out)'
 
@@ -140,12 +154,14 @@ router.get('/:id', async (req, res) => {
     const conversation = await getConversation(req.workspace.customerId, req.params.id)
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' })
     const { data: messages, error } = await supabase.from('messages')
-      .select('id,direction,to_number,from_number,message_body,status,created_at,meta_message_id,inbound_media')
+      .select('id,direction,to_number,from_number,message_body,status,created_at,meta_message_id,inbound_media,outbound_media')
       .eq('customer_id', req.workspace.customerId)
       .eq('conversation_id', conversation.id)
       .order('created_at', { ascending: true })
     if (error) throw error
-    return res.json({ conversation, messages: (messages || []).map(({ inbound_media, ...message }) => ({ ...message, inbound_media: publicInboundMedia(inbound_media) })) })
+    return res.json({ conversation, messages: (messages || []).map(({ inbound_media, outbound_media, ...message }) => ({
+      ...message, inbound_media: publicInboundMedia(inbound_media), outbound_media: publicMessageMedia(outbound_media)
+    })) })
   } catch {
     return res.status(500).json({ error: 'Unable to load this conversation' })
   }
@@ -158,14 +174,14 @@ router.get('/:id/messages/:messageId/media', async (req, res) => {
     const conversation = await getConversation(req.workspace.customerId, req.params.id)
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' })
     const { data: message, error } = await supabase.from('messages')
-      .select('id,customer_id,whatsapp_number_id,conversation_id,direction,inbound_media')
+      .select('id,customer_id,whatsapp_number_id,conversation_id,direction,inbound_media,outbound_media')
       .eq('id', req.params.messageId)
       .eq('customer_id', req.workspace.customerId)
       .eq('conversation_id', conversation.id)
       .maybeSingle()
     if (error) throw error
-    const image = message?.direction === 'inbound' ? storedInboundImage(message.inbound_media) : null
-    if (!image) return res.status(404).json({ error: 'Image is unavailable' })
+    const attachment = message?.direction === 'inbound' ? storedInboundAttachment(message.inbound_media) : storedAttachment(message?.outbound_media)
+    if (!attachment) return res.status(404).json({ error: 'Attachment is unavailable' })
     const { data: number, error: numberError } = await supabase.from('whatsapp_numbers')
       .select('id,customer_id,phone_number_id,access_token,status')
       .eq('id', message.whatsapp_number_id)
@@ -173,15 +189,16 @@ router.get('/:id/messages/:messageId/media', async (req, res) => {
       .eq('status', 'connected')
       .maybeSingle()
     if (numberError) throw numberError
-    if (!number) return res.status(404).json({ error: 'Image is unavailable' })
+    if (!number) return res.status(404).json({ error: 'Attachment is unavailable' })
     const accessToken = await mediaAccessToken(number)
-    if (!accessToken) return res.status(404).json({ error: 'Image is unavailable' })
-    const media = await fetchWhatsAppImage({ mediaId: image.mediaId, accessToken })
-    res.set({ 'Content-Type': media.mimeType || image.mimeType || 'image/jpeg', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' })
+    if (!accessToken) return res.status(404).json({ error: 'Attachment is unavailable' })
+    const media = await fetchWhatsAppMedia({ mediaId: attachment.mediaId, accessToken, expectedType: attachment.type })
+    const mimeType = media.mimeType || attachment.mimeType || 'application/octet-stream'
+    res.set({ 'Content-Type': mimeType, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', ...(attachment.type === 'document' ? { 'Content-Disposition': `attachment; filename="${String(attachment.filename || 'document').replace(/["\\\r\n]/g, '_')}"` } : {}) })
     return res.status(200).send(media.buffer)
   } catch (error) {
     if (error instanceof WhatsAppMediaError) return res.status(error.status).json({ error: error.message })
-    return res.status(502).json({ error: 'Image could not be loaded' })
+    return res.status(502).json({ error: 'Attachment could not be loaded' })
   }
 })
 
@@ -391,6 +408,76 @@ router.post('/:id/reply', async (req, res) => {
       await recordConversationEvent({ customerId: req.workspace.customerId, conversationId: conversation.id, actorUserId: req.workspace.userId, eventType: 'human_reply_failed' }).catch(() => {})
     }
     return res.status(502).json({ error: 'Unable to send this reply' })
+  }
+})
+
+async function humanReplyTarget(req) {
+  const conversation = await getConversation(req.workspace.customerId, req.params.id)
+  if (!conversation) {
+    const error = new Error('Conversation not found'); error.status = 404; throw error
+  }
+  if (conversation.status === 'resolved' || conversation.control_mode !== 'human') {
+    const error = new Error('Take this conversation before sending a human reply'); error.status = 409; throw error
+  }
+  if (!isAdmin(req.workspace.role) && conversation.assigned_user_id !== req.workspace.userId) {
+    const error = new Error('Only the assigned team member can reply'); error.status = 403; throw error
+  }
+  const { data: contact, error: contactError } = await supabase.from('contacts')
+    .select('id,phone_number').eq('id', conversation.contact_id).eq('customer_id', req.workspace.customerId).maybeSingle()
+  if (contactError) throw contactError
+  if (!contact) { const error = new Error('This conversation has no valid contact'); error.status = 409; throw error }
+  const { data: number, error: numberError } = await supabase.from('whatsapp_numbers')
+    .select('id,customer_id,phone_number_id,access_token').eq('id', conversation.whatsapp_number_id).eq('customer_id', req.workspace.customerId).eq('status', 'connected').maybeSingle()
+  if (numberError) throw numberError
+  if (!number) { const error = new Error('The WhatsApp connection for this conversation is unavailable'); error.status = 409; throw error }
+  return { conversation, contact, number }
+}
+
+async function recordHumanRichMessage({ workspace, target, messageBody, media, metaResult, eventType }) {
+  const now = new Date().toISOString()
+  const { error: messageError } = await supabase.from('messages').insert({
+    customer_id: workspace.customerId, whatsapp_number_id: target.number.id, contact_id: target.contact.id,
+    conversation_id: target.conversation.id, direction: 'outbound', to_number: target.contact.phone_number,
+    message_body: messageBody || null, outbound_media: media, status: 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null
+  })
+  if (messageError) throw messageError
+  const { data: conversation, error } = await supabase.from('conversations').update({ last_message_at: now, last_outbound_at: now, updated_at: now })
+    .eq('id', target.conversation.id).eq('customer_id', workspace.customerId).select(CONVERSATION_FIELDS).single()
+  if (error) throw error
+  await recordConversationEvent({ customerId: workspace.customerId, conversationId: target.conversation.id, actorUserId: workspace.userId, eventType })
+  return conversation
+}
+
+router.post('/:id/media', parseConversationUpload, async (req, res) => {
+  let target
+  try {
+    target = await humanReplyTarget(req)
+    const attachment = validateOutboundUpload(req.file, String(req.body?.type || '').toLowerCase(), req.body?.caption)
+    const accessToken = await mediaAccessToken(target.number)
+    if (!accessToken) return res.status(409).json({ error: 'The WhatsApp connection for this conversation is unavailable' })
+    const mediaId = await uploadWhatsAppMedia(target.number.phone_number_id, { ...attachment.file, mimetype: attachment.mime_type, originalname: attachment.filename }, accessToken)
+    const metaResult = attachment.type === 'image'
+      ? await sendImageMessage(target.number.phone_number_id, target.contact.phone_number, { id: mediaId, caption: attachment.caption }, accessToken)
+      : await sendDocumentMessage(target.number.phone_number_id, target.contact.phone_number, { id: mediaId, caption: attachment.caption, filename: attachment.filename }, accessToken)
+    const outboundMedia = { type: attachment.type, media_id: mediaId, mime_type: attachment.mime_type, filename: attachment.filename, caption: attachment.caption }
+    const conversation = await recordHumanRichMessage({ workspace: req.workspace, target, messageBody: attachment.caption, media: outboundMedia, metaResult, eventType: 'human_attachment_sent' })
+    return res.json({ conversation, message_status: 'sent' })
+  } catch (error) {
+    return res.status(error.status || 502).json({ error: error.status ? error.message : 'Unable to send this attachment' })
+  }
+})
+
+router.post('/:id/location', async (req, res) => {
+  try {
+    const target = await humanReplyTarget(req)
+    const location = parseLocation(req.body)
+    const accessToken = await mediaAccessToken(target.number)
+    if (!accessToken) return res.status(409).json({ error: 'The WhatsApp connection for this conversation is unavailable' })
+    const metaResult = await sendLocationMessage(target.number.phone_number_id, target.contact.phone_number, location, accessToken)
+    const conversation = await recordHumanRichMessage({ workspace: req.workspace, target, messageBody: null, media: location, metaResult, eventType: 'human_location_sent' })
+    return res.json({ conversation, message_status: 'sent' })
+  } catch (error) {
+    return res.status(error.status || 502).json({ error: error.status ? error.message : 'Unable to send this location' })
   }
 })
 
