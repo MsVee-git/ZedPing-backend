@@ -3,7 +3,7 @@ const crypto = require('crypto')
 const router = express.Router()
 const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
-const { createMetaEmbeddedSignupClient, MetaSignupError, emitEmbeddedSignupDiagnostic } = require('../lib/metaEmbeddedSignup')
+const { createMetaEmbeddedSignupClient, MetaSignupError, emitEmbeddedSignupDiagnostic, completionFailureDiagnostic } = require('../lib/metaEmbeddedSignup')
 const { createCredentialVault, CredentialVaultError } = require('../lib/credentialVault')
 
 const SESSION_TTL_MINUTES = 15
@@ -39,6 +39,10 @@ function emitPersistenceReady(success, error) {
     { stage: 'persistence_ready', success, ...(error ? { error } : {}) },
     (record) => console.info(JSON.stringify(record))
   )
+}
+
+function emitCompletionFailure({ stage, sessionId, customerId, error }) {
+  console.info(JSON.stringify(completionFailureDiagnostic({ stage, sessionId, workspaceId: customerId, error })))
 }
 
 function provisioningView(connection) {
@@ -100,6 +104,8 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
   if (invalid) return res.status(400).json({ error: invalid })
   if (!req.workspace.emailVerified) return res.status(403).json({ error: 'Verify your email before connecting WhatsApp' })
 
+  let completionStage = 'oauth_code_exchange'
+  let completionSessionId = req.body?.session_id || null
   try {
     const { session_id: sessionId, state, code, phone_number_id: phoneNumberId, finish_waba_id: finishWabaId } = req.body
     const { data: session } = await supabase
@@ -119,8 +125,11 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
     if (new Date(session.expires_at).getTime() <= Date.now()) return res.status(410).json({ error: 'This connection session has expired. Start again.' })
 
     const meta = createMetaEmbeddedSignupClient()
+    completionStage = 'oauth_code_exchange'
     const temporaryToken = await meta.exchangeCode(code)
+    completionStage = 'ownership_validation'
     const validated = await meta.validatePhoneOwnership({ accessToken: temporaryToken, phoneNumberId, finishWabaId: finishWabaId || null })
+    completionStage = 'whatsapp_number_persistence'
     const conflict = await findConflict(req.workspace.customerId, validated.phoneNumberId, validated.wabaId, validated.displayPhoneNumber)
     if (conflict.kind === 'foreign') {
       emitPersistenceReady(false, new MetaSignupError('This WhatsApp number is already connected to another workspace'))
@@ -164,11 +173,14 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
     // legacy plaintext access_token field.
     const vault = createCredentialVault()
     const registrationPin = pin()
+    completionStage = 'credential_storage'
     await vault.put({ customerId: req.workspace.customerId, integration: 'meta_whatsapp', credentialKey: `phone_${validated.phoneNumberId}`, plaintext: temporaryToken })
     await vault.put({ customerId: req.workspace.customerId, integration: 'meta_whatsapp', credentialKey: `phone_${validated.phoneNumberId}_registration_pin`, plaintext: registrationPin })
     await supabase.from('whatsapp_numbers').update({ status: 'provisioning', provisioning_state: 'registering', provisioning_error: null, provisioning_attempts: Number(connection.provisioning_attempts || 0) + 1, provisioning_started_at: connection.provisioning_started_at || new Date().toISOString() }).eq('id', connection.id).eq('customer_id', req.workspace.customerId)
     try {
+      completionStage = 'waba_subscription'
       await meta.subscribeApp(validated.wabaId, temporaryToken)
+      completionStage = 'phone_registration'
       await meta.registerPhone(validated.phoneNumberId, temporaryToken, registrationPin)
       const { data: operational, error: operationalError } = await supabase.from('whatsapp_numbers').update({ status: 'connected', provisioning_state: 'operational', provisioning_error: null, provisioned_at: new Date().toISOString() }).eq('id', connection.id).eq('customer_id', req.workspace.customerId).select('id, customer_id, phone_number, phone_number_id, whatsapp_business_account_id, display_name, status, provisioning_state, provisioning_error, provisioned_at').single()
       if (operationalError) throw operationalError
@@ -176,6 +188,7 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
       await supabase.from('customers').update({ whatsapp_connected_at: new Date().toISOString() }).eq('id', req.workspace.customerId).is('whatsapp_connected_at', null)
       emitPersistenceReady(true)
     } catch (error) {
+      emitCompletionFailure({ stage: completionStage, sessionId: completionSessionId, customerId: req.workspace.customerId, error })
       await supabase.from('whatsapp_numbers').update({ status: 'provisioning', provisioning_state: 'failed', provisioning_error: 'registration_failed' }).eq('id', connection.id).eq('customer_id', req.workspace.customerId)
       emitPersistenceReady(false, error)
       return res.status(422).json({ error: 'WhatsApp provisioning needs attention. You can retry safely.', connection: { ...provisioningView(connection), status: 'provisioning', provisioning_state: 'failed', provisioning_error: 'registration_failed' } })
@@ -192,6 +205,7 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
 
     return res.status(201).json({ connection: provisioningView(connection), idempotent: Boolean(conflict.record) })
   } catch (error) {
+    emitCompletionFailure({ stage: completionStage, sessionId: completionSessionId, customerId: req.workspace.customerId, error })
     if (error instanceof MetaSignupError || error instanceof CredentialVaultError) return res.status(422).json({ error: 'Meta could not complete secure WhatsApp provisioning' })
     return res.status(500).json({ error: 'Unable to complete WhatsApp connection' })
   }

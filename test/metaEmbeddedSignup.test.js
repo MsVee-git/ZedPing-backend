@@ -1,6 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { createMetaEmbeddedSignupClient, MetaSignupError } = require('../lib/metaEmbeddedSignup')
+const { createMetaEmbeddedSignupClient, MetaSignupError, completionFailureDiagnostic } = require('../lib/metaEmbeddedSignup')
 
 const env = {
   META_APP_ID: '123456',
@@ -129,6 +129,51 @@ test('classifies Meta API failures separately from ZedPing validation failures',
     meta_error_type: 'OAuthException',
     meta_error_message: 'Invalid OAuth access token.'
   })
+})
+
+test('attributes completion failures to their internal stage without serializing credentials', () => {
+  const stages = [
+    'oauth_code_exchange',
+    'ownership_validation',
+    'whatsapp_number_persistence',
+    'credential_storage',
+    'waba_subscription',
+    'phone_registration'
+  ]
+  const sessionId = '11111111-1111-4111-8111-111111111111'
+  const workspaceId = '22222222-2222-4222-8222-222222222222'
+  const error = new Error('OAuth code authorization-code-not-for-logs with PIN 123456 and token temporary-access-token-not-for-logs failed')
+  error.response = {
+    status: 400,
+    data: { error: { code: 190, type: 'OAuthException', message: 'Token temporary-access-token-not-for-logs is invalid for 260700111222' } }
+  }
+
+  for (const stage of stages) {
+    const record = completionFailureDiagnostic({ stage, sessionId, workspaceId, error })
+    assert.equal(record.event, 'embedded_signup_completion_failure')
+    assert.equal(record.stage, stage)
+    assert.equal(record.session_id, sessionId)
+    assert.equal(record.workspace_id, workspaceId)
+    assert.equal(record.http_status, 400)
+    assert.equal(record.meta_error_code, 190)
+    assert.equal(record.meta_error_type, 'OAuthException')
+    const output = JSON.stringify(record)
+    for (const secret of ['authorization-code-not-for-logs', '123456', 'temporary-access-token-not-for-logs', '260700111222']) assert.equal(output.includes(secret), false)
+  }
+})
+
+test('records safe database error metadata for completion persistence failures', () => {
+  const error = new Error('duplicate key value violates unique constraint')
+  error.code = '23505'
+  const record = completionFailureDiagnostic({
+    stage: 'whatsapp_number_persistence',
+    sessionId: '11111111-1111-4111-8111-111111111111',
+    workspaceId: '22222222-2222-4222-8222-222222222222',
+    error
+  })
+  assert.equal(record.source, 'database')
+  assert.equal(record.database_error_code, '23505')
+  assert.equal(record.database_error_message, 'duplicate key value violates unique constraint')
 })
 
 
