@@ -11,6 +11,7 @@ const { closeActiveAiSessionsForConversation } = require('../lib/aiAgentSessions
 const { createCredentialVault, CredentialVaultError } = require('../lib/credentialVault')
 const { storedInboundImage, publicInboundMedia } = require('../lib/inboundMedia')
 const { fetchWhatsAppImage, WhatsAppMediaError } = require('../lib/whatsappMedia')
+const { configuredAccessToken } = require('../lib/whatsapp')
 
 const CONVERSATION_FIELDS = 'id, customer_id, whatsapp_number_id, contact_id, status, control_mode, assigned_user_id, handoff_reason, handoff_at, taken_over_at, resolved_at, resolved_by_user_id, last_message_at, last_inbound_at, last_outbound_at, unread_count, created_at, updated_at, contacts(id,name,phone_number,tag,marketing_opted_out)'
 
@@ -50,7 +51,10 @@ async function mediaAccessToken(number) {
     // path. A missing vault configuration must not expose any error detail.
     if (!(error instanceof CredentialVaultError)) throw error
   }
-  return number.access_token || null
+  // Legacy connected numbers use the same backend-only app credential that
+  // existing outbound WhatsApp delivery uses. The route has already scoped the
+  // conversation, message and connected number to the authenticated workspace.
+  return configuredAccessToken(number.access_token)
 }
 
 async function memberForWorkspace(customerId, userId) {
