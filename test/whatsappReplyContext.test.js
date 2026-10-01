@@ -62,3 +62,14 @@ test('quote context remains reference context, not a knowledge authorization byp
   assert.match(grounding, /knowledge_snapshot/)
   assert.doesNotMatch(fs.readFileSync(path.join(__dirname, '..', 'lib', 'replyContext.js'), 'utf8'), /knowledge_snapshot|approved knowledge/)
 })
+
+test('reply-context migration is atomic, rerunnable, and revokes the zero-argument trigger function', () => {
+  const migration = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20261001130000_add_whatsapp_reply_context.sql'), 'utf8')
+  assert.match(migration, /^begin;/m)
+  assert.match(migration, /add column if not exists reply_to_message_id/)
+  assert.match(migration, /create or replace function public\.assert_message_reply_context_workspace\(\)/)
+  assert.match(migration, /revoke all on function public\.assert_message_reply_context_workspace\(\) from public;/)
+  assert.match(migration, /drop trigger if exists messages_reply_context_workspace_integrity/)
+  assert.match(migration, /same workspace, WhatsApp number, and conversation/)
+  assert.match(migration, /commit;\s*$/)
+})
