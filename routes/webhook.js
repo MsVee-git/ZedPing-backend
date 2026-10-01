@@ -19,6 +19,7 @@ const { normalizePhone } = require('../lib/contactImport')
 const { buildLiveSystem, configuredHandoff, handoffReply, handoffConfirmation, isCustomerSafeReply, hasNaturalTeamTransition, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
 const { commercialTurn, commercialMetadata } = require('../lib/zoeCommercial')
 const { mayExecute } = require('../lib/aiDeploymentMode')
+const { parseInboundMedia } = require('../lib/inboundMedia')
 
 router.get('/', (req, res) => {
   const received = Buffer.from(String(req.query['hub.verify_token'] || ''))
@@ -47,7 +48,8 @@ router.post('/', async (req, res) => {
         .eq('phone_number_id', phoneNumberId).eq('status', 'connected').maybeSingle()
       if (!number) continue
       for (const incoming of value.messages || []) {
-        await processMessage({ customerId: number.customer_id, number, from: incoming.from, body: incoming.text?.body || '', metaId: incoming.id })
+        const parsed = parseInboundMedia(incoming)
+        await processMessage({ customerId: number.customer_id, number, from: incoming.from, body: parsed.body, media: parsed.media, metaId: incoming.id })
       }
     }
   } catch (error) {
@@ -136,6 +138,7 @@ async function persistInbound(ctx, contact, conversation) {
     from_number: ctx.from,
     to_number: ctx.number.phone_number,
     message_body: ctx.body,
+    inbound_media: ctx.media,
     status: 'received',
     meta_message_id: ctx.metaId
   })

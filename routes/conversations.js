@@ -8,6 +8,9 @@ const { mayResolve } = require('../lib/conversationState')
 const { recordConversationEvent } = require('../lib/conversationEvents')
 const { handoffActiveFlowForConversation } = require('../lib/chatbotExecution')
 const { closeActiveAiSessionsForConversation } = require('../lib/aiAgentSessions')
+const { createCredentialVault, CredentialVaultError } = require('../lib/credentialVault')
+const { storedInboundImage, publicInboundMedia } = require('../lib/inboundMedia')
+const { fetchWhatsAppImage, WhatsAppMediaError } = require('../lib/whatsappMedia')
 
 const CONVERSATION_FIELDS = 'id, customer_id, whatsapp_number_id, contact_id, status, control_mode, assigned_user_id, handoff_reason, handoff_at, taken_over_at, resolved_at, resolved_by_user_id, last_message_at, last_inbound_at, last_outbound_at, unread_count, created_at, updated_at, contacts(id,name,phone_number,tag,marketing_opted_out)'
 
@@ -35,6 +38,19 @@ async function getConversation(customerId, id) {
     .maybeSingle()
   if (error) throw error
   return data || null
+}
+
+async function mediaAccessToken(number) {
+  try {
+    const vault = createCredentialVault()
+    const stored = await vault.get({ customerId: number.customer_id, integration: 'meta_whatsapp', credentialKey: `phone_${number.phone_number_id}` })
+    if (stored) return stored
+  } catch (error) {
+    // Connected legacy numbers retain their existing server-only credential
+    // path. A missing vault configuration must not expose any error detail.
+    if (!(error instanceof CredentialVaultError)) throw error
+  }
+  return number.access_token || null
 }
 
 async function memberForWorkspace(customerId, userId) {
@@ -120,14 +136,48 @@ router.get('/:id', async (req, res) => {
     const conversation = await getConversation(req.workspace.customerId, req.params.id)
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' })
     const { data: messages, error } = await supabase.from('messages')
-      .select('id,direction,to_number,from_number,message_body,status,created_at,meta_message_id')
+      .select('id,direction,to_number,from_number,message_body,status,created_at,meta_message_id,inbound_media')
       .eq('customer_id', req.workspace.customerId)
       .eq('conversation_id', conversation.id)
       .order('created_at', { ascending: true })
     if (error) throw error
-    return res.json({ conversation, messages: messages || [] })
+    return res.json({ conversation, messages: (messages || []).map(({ inbound_media, ...message }) => ({ ...message, inbound_media: publicInboundMedia(inbound_media) })) })
   } catch {
     return res.status(500).json({ error: 'Unable to load this conversation' })
+  }
+})
+
+// The browser supplies only the conversation and message IDs. Both are scoped
+// to the authenticated workspace before the stored Meta media ID is used.
+router.get('/:id/messages/:messageId/media', async (req, res) => {
+  try {
+    const conversation = await getConversation(req.workspace.customerId, req.params.id)
+    if (!conversation) return res.status(404).json({ error: 'Conversation not found' })
+    const { data: message, error } = await supabase.from('messages')
+      .select('id,customer_id,whatsapp_number_id,conversation_id,direction,inbound_media')
+      .eq('id', req.params.messageId)
+      .eq('customer_id', req.workspace.customerId)
+      .eq('conversation_id', conversation.id)
+      .maybeSingle()
+    if (error) throw error
+    const image = message?.direction === 'inbound' ? storedInboundImage(message.inbound_media) : null
+    if (!image) return res.status(404).json({ error: 'Image is unavailable' })
+    const { data: number, error: numberError } = await supabase.from('whatsapp_numbers')
+      .select('id,customer_id,phone_number_id,access_token,status')
+      .eq('id', message.whatsapp_number_id)
+      .eq('customer_id', req.workspace.customerId)
+      .eq('status', 'connected')
+      .maybeSingle()
+    if (numberError) throw numberError
+    if (!number) return res.status(404).json({ error: 'Image is unavailable' })
+    const accessToken = await mediaAccessToken(number)
+    if (!accessToken) return res.status(404).json({ error: 'Image is unavailable' })
+    const media = await fetchWhatsAppImage({ mediaId: image.mediaId, accessToken })
+    res.set({ 'Content-Type': media.mimeType || image.mimeType || 'image/jpeg', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' })
+    return res.status(200).send(media.buffer)
+  } catch (error) {
+    if (error instanceof WhatsAppMediaError) return res.status(error.status).json({ error: error.message })
+    return res.status(502).json({ error: 'Image could not be loaded' })
   }
 })
 

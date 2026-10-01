@@ -12,6 +12,15 @@ test('webhook checks conversation control before all automation engines', () => 
   assert.ok(guard < source.indexOf('await checkAutomations(ctx)'))
 })
 
+test('webhook persists incoming image metadata while retaining the existing Meta idempotency claim', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhook.js'), 'utf8')
+  assert.ok(source.includes("const { parseInboundMedia } = require('../lib/inboundMedia')"))
+  assert.ok(source.includes('const parsed = parseInboundMedia(incoming)'))
+  assert.ok(source.includes('media: parsed.media'))
+  assert.ok(source.includes('inbound_media: ctx.media'))
+  assert.ok(source.indexOf('if (!(await claimInboundEvent(ctx))) return') < source.indexOf('const contact = await findOrCreateContact(ctx)'))
+})
+
 test('team inbox reply derives connection and contact from the conversation', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'conversations.js'), 'utf8')
   assert.ok(source.includes(".eq('id', conversation.whatsapp_number_id).eq('customer_id', req.workspace.customerId)"))
