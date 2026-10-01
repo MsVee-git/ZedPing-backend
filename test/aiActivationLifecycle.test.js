@@ -67,11 +67,34 @@ test('the database promotion locks the scoped agent and commits version plus lif
 test('activation responses expose a finalized version and timestamp rather than optimistic success', () => {
   const activate = routeBody('/:id/activate')
   const updateLive = routeBody('/:id/update-live')
+  assert.match(activate, /activation:\{version:result\.version,activated_at:result\.activatedAt/)
+  assert.match(updateLive, /activation:\{version:result\.version,configuration_version:result\.version,activated_at:result\.activatedAt/)
   for (const body of [activate, updateLive]) {
-    assert.match(body, /activation:\{version:result\.version,activated_at:result\.activatedAt/)
     assert.match(body, /activated_configuration_version:result\.version/)
     assert.match(body, /changes_not_live_yet:false/)
   }
+})
+
+test('Update Live keeps the five-source cap while returning a safe, actionable validation result', () => {
+  const body = routeBody('/:id/update-live')
+  assert.match(routeSource, /const MAX_KNOWLEDGE_ITEMS = 5/)
+  assert.match(routeSource, /This draft has more approved knowledge sources than the current limit\. Remove a source before updating Live\./)
+  assert.match(body, /activation:\{version:result\.version,configuration_version:result\.version,activated_at:result\.activatedAt,knowledge_source_count:result\.knowledge\.length,knowledge_snapshot_entries:result\.snapshotEntries/)
+  assert.match(body, /res\.status\(failure\.code === 'number_conflict' \? 409 : 422\)\.json\(\{ error:failure\.message, code:failure\.code \}\)/)
+  assert.doesNotMatch(body, /error:error\.message/)
+})
+
+test('Update Live logs only structured stage diagnostics and preserves optimistic-concurrency idempotency', () => {
+  const body = routeBody('/:id/update-live')
+  const start = routeSource.indexOf('function emitActivationFailure')
+  const end = routeSource.indexOf('function changesNotLiveYet', start)
+  const diagnostic = routeSource.slice(start, end)
+  assert.match(body, /let activationStage = 'load_agent'/)
+  assert.match(body, /onStage:stage => \{ activationStage = stage \}/)
+  assert.match(body, /emitActivationFailure\(\{ stage:activationStage, customerId:req\.workspace\.customerId, agentId:req\.params\.id, error \}\)/)
+  assert.match(diagnostic, /event:'ai_agent_update_live_failed'/)
+  assert.match(diagnostic, /database_error_code:databaseCode/)
+  assert.doesNotMatch(diagnostic, /error\.message|knowledge_snapshot|text_content|console\.info\(.*error\)/)
 })
 
 test('active agents can save draft-only changes for Update Live without changing the bound runtime number', () => {

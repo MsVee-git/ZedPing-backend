@@ -15,6 +15,17 @@ const MAX_KNOWLEDGE_ITEM_CHARS = 3000
 const MAX_KNOWLEDGE_CONTEXT_CHARS = 10000
 const MAX_TEST_MESSAGES = 12
 const STYLES = new Set(['professional', 'friendly', 'warm', 'concise'])
+const ACTIVATION_SAFE_FAILURES = [
+  [/^Select no more than \d+ approved knowledge items$/, 'knowledge_limit', 'This draft has more approved knowledge sources than the current limit. Remove a source before updating Live.'],
+  [/^Select at least one eligible approved knowledge item before activation$/, 'knowledge_missing', 'Select at least one eligible approved knowledge source before updating Live.'],
+  [/^Every knowledge item must be active approved knowledge from this workspace$/, 'knowledge_ineligible', 'One or more selected knowledge sources are no longer eligible. Review the draft before updating Live.'],
+  [/^Configure handoff behaviour before activation$/, 'handoff_missing', 'Configure handoff behaviour before updating Live.'],
+  [/^Select a connected WhatsApp number from this workspace$/, 'number_unavailable', 'The connected WhatsApp number is unavailable. Review the agent before updating Live.'],
+  [/^Another AI Agent is already active on this WhatsApp number$/, 'number_conflict', 'Another active AI Agent already uses this WhatsApp number.'],
+  [/^Add at least one approved test contact before controlled activation$/, 'test_contact_missing', 'Add an approved test contact before updating this agent.'],
+  [/^AI Agent changed before activation; review it again$/, 'stale_draft', 'This agent changed before the update completed. Refresh and review it again.'],
+  [/^Only an active AI Agent can update its live configuration$/, 'not_active', 'Only an active AI Agent can update its live configuration.']
+]
 const TEMPLATES = [
   { key:'common_questions', title:'Common business questions', role:'Answers common customer questions from approved business information.', can:'Business information you select', handoff:'When approved information is not enough', unavailable:'Prices, live stock, bookings and actions it cannot verify' },
   { key:'sales_interest', title:'Sales & customer interest', role:'Helps identify customer interest and passes qualified conversations to your team.', can:'Approved product and service information', handoff:'Quote, purchase or team requests', unavailable:'Quotes, payment and order actions' },
@@ -37,6 +48,29 @@ function cleanText(value, label, max, required = false) {
 function templateFor(key) { const value = TEMPLATES.find(item => item.key === key); if (!value) throw new Error('Choose an AI Agent template'); return value }
 function activatedConfiguration(agent) {
   return { name:agent.name, template_key:agent.zoe_template_key, configuration:agent.zoe_configuration || {}, whatsapp_number_id:agent.whatsapp_number_id }
+}
+function safeActivationFailure(error) {
+  const message = String(error?.message || '')
+  const matched = ACTIVATION_SAFE_FAILURES.find(([pattern]) => pattern.test(message))
+  if (matched) return { code:matched[1], message:matched[2] }
+  if (error?.code === '23505') return { code:'number_conflict', message:'Another active AI Agent already uses this WhatsApp number.' }
+  return { code:'activation_failed', message:'We could not update the live agent. The current live version remains unchanged.' }
+}
+function safeUuid(value) {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value : null
+}
+function emitActivationFailure({ stage, customerId, agentId, error }) {
+  const failure = safeActivationFailure(error)
+  const databaseCode = typeof error?.code === 'string' && (/^[0-9A-Z]{5}$/.test(error.code) || /^PGRST[0-9A-Z]+$/.test(error.code)) ? error.code : null
+  console.info(JSON.stringify({
+    event:'ai_agent_update_live_failed',
+    stage:['load_agent','readiness','current_version','snapshot','atomic_promotion','finalization'].includes(stage) ? stage : 'unknown',
+    customer_id:safeUuid(customerId),
+    agent_id:safeUuid(agentId),
+    error_code:failure.code,
+    database_error_code:databaseCode
+  }))
+  return failure
 }
 function changesNotLiveYet(agent, knowledge, version) {
   if (agent.lifecycle_status !== 'active') return false
@@ -266,16 +300,20 @@ async function activationReadiness(customerId, agent, { allowActiveUpdate = fals
   return knowledge
 }
 
-async function activateCurrentConfiguration(customerId, agent, userId, { allowActiveUpdate = false } = {}) {
+async function activateCurrentConfiguration(customerId, agent, userId, { allowActiveUpdate = false, onStage = null } = {}) {
+  onStage?.('readiness')
   const knowledge = await activationReadiness(customerId, agent, { allowActiveUpdate })
+  onStage?.('current_version')
   const existingActivated = await activatedVersionForAgent(customerId, agent)
   if (allowActiveUpdate && isActiveAgent(agent) && !changesNotLiveYet(agent, knowledge, existingActivated)) {
-    return { agent, knowledge, version:existingActivated.version, activatedAt:existingActivated.activated_at, alreadyCurrent:true }
+    return { agent, knowledge, version:existingActivated.version, activatedAt:existingActivated.activated_at, snapshotEntries:existingActivated.knowledge_snapshot?.length || 0, alreadyCurrent:true }
   }
 
+  onStage?.('snapshot')
   const snapshot = knowledgeSnapshot(knowledge)
   if (!snapshot.length) throw new Error('Select at least one eligible approved knowledge item before activation')
   const targetMode = allowActiveUpdate && isActiveAgent(agent) ? deploymentMode(agent) : 'test'
+  onStage?.('atomic_promotion')
   const { data, error } = await supabase.rpc('activate_ai_agent_version', {
     p_customer_id:customerId,
     p_agent_id:agent.id,
@@ -300,6 +338,7 @@ async function activateCurrentConfiguration(customerId, agent, userId, { allowAc
           knowledge:refreshedKnowledge,
           version:refreshedVersion.version,
           activatedAt:refreshedVersion.activated_at,
+          snapshotEntries:refreshedVersion.knowledge_snapshot?.length || 0,
           alreadyCurrent:true
         }
       }
@@ -308,12 +347,13 @@ async function activateCurrentConfiguration(customerId, agent, userId, { allowAc
   }
   const activated = Array.isArray(data) ? data[0] : data
   if (!activated || !Number.isInteger(Number(activated.version)) || !activated.activated_at) throw new Error('AI Agent activation did not produce an immutable version')
+  onStage?.('finalization')
   const { data:updated, error:updatedError } = await supabase.from('ai_agents').select('*')
     .eq('id',agent.id).eq('customer_id',customerId).eq('lifecycle_status','active').eq('is_active',true)
     .eq('configuration_version',Number(activated.version)).maybeSingle()
   if (updatedError) throw updatedError
   if (!updated) throw new Error('AI Agent activation did not finalize')
-  return { agent:updated, knowledge, version:Number(activated.version), activatedAt:activated.activated_at, alreadyCurrent:false }
+  return { agent:updated, knowledge, version:Number(activated.version), activatedAt:activated.activated_at, snapshotEntries:snapshot.length, alreadyCurrent:false }
 }
 
 router.get('/:id/test-contacts', requireAdmin, async (req,res) => {
@@ -384,19 +424,23 @@ async function activatedVersionForAgent(customerId, agent) {
 }
 
 router.post('/:id/update-live', requireAdmin, async (req,res) => {
+  let activationStage = 'load_agent'
   try {
     const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
     if (!isActiveAgent(agent)) throw new Error('Only an active AI Agent can update its live configuration')
-    const result = await activateCurrentConfiguration(req.workspace.customerId, agent, req.workspace.userId, { allowActiveUpdate:true })
+    const result = await activateCurrentConfiguration(req.workspace.customerId, agent, req.workspace.userId, { allowActiveUpdate:true, onStage:stage => { activationStage = stage } })
     res.json({
       agent:safeAgent(result.agent,result.knowledge.map(({text_content,...safe})=>safe),{
         activated_configuration_version:result.version,
         changes_not_live_yet:false
       }),
       status:deploymentMode(result.agent),
-      activation:{version:result.version,activated_at:result.activatedAt,already_current:result.alreadyCurrent}
+      activation:{version:result.version,configuration_version:result.version,activated_at:result.activatedAt,knowledge_source_count:result.knowledge.length,knowledge_snapshot_entries:result.snapshotEntries,already_current:result.alreadyCurrent}
     })
-  } catch(error) { res.status(error?.code === '23505' ? 409 : 400).json({error:error.message || 'Unable to update the live AI Agent'}) }
+  } catch(error) {
+    const failure = emitActivationFailure({ stage:activationStage, customerId:req.workspace.customerId, agentId:req.params.id, error })
+    res.status(failure.code === 'number_conflict' ? 409 : 422).json({ error:failure.message, code:failure.code })
+  }
 })
 
 router.post('/:id/resume', requireAdmin, async (req,res) => {
