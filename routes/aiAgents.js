@@ -293,10 +293,16 @@ async function activationReadiness(customerId, agent, { allowActiveUpdate = fals
     .eq('lifecycle_status', 'active').eq('is_active', true).neq('id', agent.id)
   if (conflictError) throw conflictError
   if ((conflicts || []).length) throw new Error('Another AI Agent is already active on this WhatsApp number')
-  const { data: tests, error: testError } = await supabase.from('ai_agent_test_contacts').select('id')
-    .eq('customer_id', customerId).eq('agent_id', agent.id)
-  if (testError) throw testError
-  if (!(tests || []).length) throw new Error('Add at least one approved test contact before controlled activation')
+  // Draft activation always enters Test Mode, and an active Test agent must
+  // retain its allowlist. A Live agent's Update Live action keeps its Live
+  // mode, where ordinary eligible customers are intentionally not allowlisted.
+  const requiresTestContact = !allowActiveUpdate || deploymentMode(agent) === 'test'
+  if (requiresTestContact) {
+    const { data: tests, error: testError } = await supabase.from('ai_agent_test_contacts').select('id')
+      .eq('customer_id', customerId).eq('agent_id', agent.id)
+    if (testError) throw testError
+    if (!(tests || []).length) throw new Error('Add at least one approved test contact before controlled activation')
+  }
   return knowledge
 }
 

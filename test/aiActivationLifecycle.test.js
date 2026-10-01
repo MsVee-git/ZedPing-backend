@@ -84,6 +84,15 @@ test('Update Live keeps the five-source cap while returning a safe, actionable v
   assert.doesNotMatch(body, /error:error\.message/)
 })
 
+test('Update Live requires approved test contacts only when the preserved mode is Test', () => {
+  const helperStart = routeSource.indexOf('async function activationReadiness')
+  const helperEnd = routeSource.indexOf('\nasync function activateCurrentConfiguration', helperStart)
+  const helper = routeSource.slice(helperStart, helperEnd)
+  assert.match(helper, /const requiresTestContact = !allowActiveUpdate \|\| deploymentMode\(agent\) === 'test'/)
+  assert.match(helper, /if \(requiresTestContact\) \{[\s\S]*?ai_agent_test_contacts/)
+  assert.match(helper, /Add at least one approved test contact before controlled activation/)
+})
+
 test('Update Live logs only structured stage diagnostics and preserves optimistic-concurrency idempotency', () => {
   const body = routeBody('/:id/update-live')
   const start = routeSource.indexOf('function emitActivationFailure')
