@@ -45,6 +45,13 @@ function cleanReason(value) {
   return reason
 }
 
+function requestedReplyMessageId(value) {
+  const id = String(value || '').trim()
+  if (!id) return null
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new Error('Reply target is invalid')
+  return id
+}
+
 async function getConversation(customerId, id) {
   const { data, error } = await supabase.from('conversations')
     .select(CONVERSATION_FIELDS)
@@ -53,6 +60,21 @@ async function getConversation(customerId, id) {
     .maybeSingle()
   if (error) throw error
   return data || null
+}
+
+async function resolveOutgoingReplyContext(customerId, conversation, value) {
+  const id = requestedReplyMessageId(value)
+  if (!id) return null
+  const { data, error } = await supabase.from('messages').select('id,meta_message_id')
+    .eq('id', id).eq('customer_id', customerId).eq('whatsapp_number_id', conversation.whatsapp_number_id).eq('conversation_id', conversation.id).maybeSingle()
+  if (error) throw error
+  if (!data?.meta_message_id) { const failure = new Error('This message is not available to reply to'); failure.status = 409; throw failure }
+  return data
+}
+
+function publicReplyMessage(reply) {
+  if (!reply) return null
+  return { id: reply.id, direction: reply.direction, message_body: reply.message_body || null, status: reply.status || null, created_at: reply.created_at || null, inbound_media: publicInboundMedia(reply.inbound_media), outbound_media: publicMessageMedia(reply.outbound_media) }
 }
 
 async function mediaAccessToken(number) {
@@ -154,13 +176,13 @@ router.get('/:id', async (req, res) => {
     const conversation = await getConversation(req.workspace.customerId, req.params.id)
     if (!conversation) return res.status(404).json({ error: 'Conversation not found' })
     const { data: messages, error } = await supabase.from('messages')
-      .select('id,direction,to_number,from_number,message_body,status,created_at,meta_message_id,inbound_media,outbound_media')
+      .select('id,direction,to_number,from_number,message_body,status,created_at,meta_message_id,inbound_media,outbound_media,reply_to:messages!messages_reply_to_message_id_fkey(id,direction,message_body,status,created_at,inbound_media,outbound_media)')
       .eq('customer_id', req.workspace.customerId)
       .eq('conversation_id', conversation.id)
       .order('created_at', { ascending: true })
     if (error) throw error
-    return res.json({ conversation, messages: (messages || []).map(({ inbound_media, outbound_media, ...message }) => ({
-      ...message, inbound_media: publicInboundMedia(inbound_media), outbound_media: publicMessageMedia(outbound_media)
+    return res.json({ conversation, messages: (messages || []).map(({ inbound_media, outbound_media, reply_to, ...message }) => ({
+      ...message, inbound_media: publicInboundMedia(inbound_media), outbound_media: publicMessageMedia(outbound_media), reply_to: publicReplyMessage(reply_to)
     })) })
   } catch {
     return res.status(500).json({ error: 'Unable to load this conversation' })
@@ -350,6 +372,7 @@ router.post('/:id/reopen', async (req, res) => {
 router.post('/:id/reply', async (req, res) => {
   let conversation
   let message
+  let replyTo
   try {
     message = cleanMessage(req.body?.message)
     conversation = await getConversation(req.workspace.customerId, req.params.id)
@@ -368,8 +391,9 @@ router.post('/:id/reply', async (req, res) => {
       .select('id,phone_number_id,access_token').eq('id', conversation.whatsapp_number_id).eq('customer_id', req.workspace.customerId).eq('status', 'connected').maybeSingle()
     if (numberError) throw numberError
     if (!number) return res.status(409).json({ error: 'The WhatsApp connection for this conversation is unavailable' })
+    replyTo = await resolveOutgoingReplyContext(req.workspace.customerId, conversation, req.body?.reply_to_message_id)
 
-    const result = await sendTextMessage(number.phone_number_id, contact.phone_number, message, number.access_token)
+    const result = await sendTextMessage(number.phone_number_id, contact.phone_number, message, number.access_token, replyTo?.meta_message_id)
     const now = new Date().toISOString()
     const { error: messageError } = await supabase.from('messages').insert({
       customer_id: req.workspace.customerId,
@@ -380,7 +404,8 @@ router.post('/:id/reply', async (req, res) => {
       to_number: contact.phone_number,
       message_body: message,
       status: 'sent',
-      meta_message_id: result?.messages?.[0]?.id || null
+      meta_message_id: result?.messages?.[0]?.id || null,
+      reply_to_message_id: replyTo?.id || null
     })
     if (messageError) throw messageError
     const { data, error } = await supabase.from('conversations').update({
@@ -401,6 +426,7 @@ router.post('/:id/reply', async (req, res) => {
         conversation_id: conversation.id,
         direction: 'outbound',
         message_body: message,
+        reply_to_message_id: replyTo?.id || null,
         status: 'failed'
       })
       await supabase.from('conversations').update({ last_message_at: now, last_outbound_at: now, updated_at: now })
@@ -433,12 +459,12 @@ async function humanReplyTarget(req) {
   return { conversation, contact, number }
 }
 
-async function recordHumanRichMessage({ workspace, target, messageBody, media, metaResult, eventType }) {
+async function recordHumanRichMessage({ workspace, target, messageBody, media, metaResult, eventType, replyTo = null }) {
   const now = new Date().toISOString()
   const { error: messageError } = await supabase.from('messages').insert({
     customer_id: workspace.customerId, whatsapp_number_id: target.number.id, contact_id: target.contact.id,
     conversation_id: target.conversation.id, direction: 'outbound', to_number: target.contact.phone_number,
-    message_body: messageBody || null, outbound_media: media, status: 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null
+    message_body: messageBody || null, outbound_media: media, status: 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null, reply_to_message_id: replyTo?.id || null
   })
   if (messageError) throw messageError
   const { data: conversation, error } = await supabase.from('conversations').update({ last_message_at: now, last_outbound_at: now, updated_at: now })
@@ -452,15 +478,16 @@ router.post('/:id/media', parseConversationUpload, async (req, res) => {
   let target
   try {
     target = await humanReplyTarget(req)
+    const replyTo = await resolveOutgoingReplyContext(req.workspace.customerId, target.conversation, req.body?.reply_to_message_id)
     const attachment = validateOutboundUpload(req.file, String(req.body?.type || '').toLowerCase(), req.body?.caption)
     const accessToken = await mediaAccessToken(target.number)
     if (!accessToken) return res.status(409).json({ error: 'The WhatsApp connection for this conversation is unavailable' })
     const mediaId = await uploadWhatsAppMedia(target.number.phone_number_id, { ...attachment.file, mimetype: attachment.mime_type, originalname: attachment.filename }, accessToken)
     const metaResult = attachment.type === 'image'
-      ? await sendImageMessage(target.number.phone_number_id, target.contact.phone_number, { id: mediaId, caption: attachment.caption }, accessToken)
-      : await sendDocumentMessage(target.number.phone_number_id, target.contact.phone_number, { id: mediaId, caption: attachment.caption, filename: attachment.filename }, accessToken)
+      ? await sendImageMessage(target.number.phone_number_id, target.contact.phone_number, { id: mediaId, caption: attachment.caption }, accessToken, replyTo?.meta_message_id)
+      : await sendDocumentMessage(target.number.phone_number_id, target.contact.phone_number, { id: mediaId, caption: attachment.caption, filename: attachment.filename }, accessToken, replyTo?.meta_message_id)
     const outboundMedia = { type: attachment.type, media_id: mediaId, mime_type: attachment.mime_type, filename: attachment.filename, caption: attachment.caption }
-    const conversation = await recordHumanRichMessage({ workspace: req.workspace, target, messageBody: attachment.caption, media: outboundMedia, metaResult, eventType: 'human_attachment_sent' })
+    const conversation = await recordHumanRichMessage({ workspace: req.workspace, target, messageBody: attachment.caption, media: outboundMedia, metaResult, eventType: 'human_attachment_sent', replyTo })
     return res.json({ conversation, message_status: 'sent' })
   } catch (error) {
     return res.status(error.status || 502).json({ error: error.status ? error.message : 'Unable to send this attachment' })
@@ -470,11 +497,12 @@ router.post('/:id/media', parseConversationUpload, async (req, res) => {
 router.post('/:id/location', async (req, res) => {
   try {
     const target = await humanReplyTarget(req)
+    const replyTo = await resolveOutgoingReplyContext(req.workspace.customerId, target.conversation, req.body?.reply_to_message_id)
     const location = parseLocation(req.body)
     const accessToken = await mediaAccessToken(target.number)
     if (!accessToken) return res.status(409).json({ error: 'The WhatsApp connection for this conversation is unavailable' })
-    const metaResult = await sendLocationMessage(target.number.phone_number_id, target.contact.phone_number, location, accessToken)
-    const conversation = await recordHumanRichMessage({ workspace: req.workspace, target, messageBody: null, media: location, metaResult, eventType: 'human_location_sent' })
+    const metaResult = await sendLocationMessage(target.number.phone_number_id, target.contact.phone_number, location, accessToken, replyTo?.meta_message_id)
+    const conversation = await recordHumanRichMessage({ workspace: req.workspace, target, messageBody: null, media: location, metaResult, eventType: 'human_location_sent', replyTo })
     return res.json({ conversation, message_status: 'sent' })
   } catch (error) {
     return res.status(error.status || 502).json({ error: error.status ? error.message : 'Unable to send this location' })

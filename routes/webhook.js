@@ -20,6 +20,7 @@ const { buildLiveSystem, configuredHandoff, handoffReply, handoffConfirmation, i
 const { commercialTurn, commercialMetadata } = require('../lib/zoeCommercial')
 const { mayExecute } = require('../lib/aiDeploymentMode')
 const { parseInboundMedia } = require('../lib/inboundMedia')
+const { parseInboundReplyContext, aiReplyContext, matchingReplyMessage } = require('../lib/replyContext')
 
 router.get('/', (req, res) => {
   const received = Buffer.from(String(req.query['hub.verify_token'] || ''))
@@ -49,7 +50,7 @@ router.post('/', async (req, res) => {
       if (!number) continue
       for (const incoming of value.messages || []) {
         const parsed = parseInboundMedia(incoming)
-        await processMessage({ customerId: number.customer_id, number, from: incoming.from, body: parsed.body, media: parsed.media, metaId: incoming.id })
+        await processMessage({ customerId: number.customer_id, number, from: incoming.from, body: parsed.body, media: parsed.media, metaId: incoming.id, replyContextMetaId: parseInboundReplyContext(incoming) })
       }
     }
   } catch (error) {
@@ -92,6 +93,30 @@ async function findConversation(ctx, contact) {
   return data || null
 }
 
+async function resolveInboundReplyContext(ctx, contact, conversation) {
+  if (!ctx.replyContextMetaId) return null
+  const { data, error } = await supabase.from('messages')
+    .select('id,customer_id,whatsapp_number_id,conversation_id,contact_id,direction,message_body,inbound_media,outbound_media,status,created_at')
+    .eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id)
+    .eq('meta_message_id', ctx.replyContextMetaId).limit(2)
+  if (error) throw error
+  const match = matchingReplyMessage(data, {
+    customerId: ctx.customerId,
+    whatsappNumberId: ctx.number.id,
+    conversationId: conversation.id,
+    contactId: contact.id
+  })
+  if (!match) return null
+  if (!match.conversation_id) {
+    const { data: attached, error: attachError } = await supabase.from('messages').update({ conversation_id: conversation.id, contact_id: contact.id })
+      .eq('id', match.id).eq('customer_id', ctx.customerId).is('conversation_id', null).select('id,customer_id,whatsapp_number_id,conversation_id,contact_id,direction,message_body,inbound_media,outbound_media,status,created_at').maybeSingle()
+    if (attachError) throw attachError
+    if (!attached || attached.conversation_id !== conversation.id || attached.contact_id !== contact.id) return null
+    return attached
+  }
+  return match
+}
+
 async function persistInbound(ctx, contact, conversation) {
   const now = new Date().toISOString()
   const state = stateForInbound(conversation)
@@ -129,6 +154,8 @@ async function persistInbound(ctx, contact, conversation) {
     }
   }
 
+  const replyTo = await resolveInboundReplyContext(ctx, contact, conversation)
+  ctx.replyToMessage = replyTo
   const { error: messageError } = await supabase.from('messages').insert({
     customer_id: ctx.customerId,
     whatsapp_number_id: ctx.number.id,
@@ -139,6 +166,8 @@ async function persistInbound(ctx, contact, conversation) {
     to_number: ctx.number.phone_number,
     message_body: ctx.body,
     inbound_media: ctx.media,
+    reply_to_message_id: replyTo?.id || null,
+    reply_context_meta_id: ctx.replyContextMetaId || null,
     status: 'received',
     meta_message_id: ctx.metaId
   })
@@ -413,14 +442,16 @@ async function updateLiveSession(ctx, session, { messages, commercialContext }) 
 }
 
 async function runLiveAiTurn(ctx, session, agent, version) {
-  const live = buildLiveSystem(agent, version, ctx.body)
+  const quotedContext = aiReplyContext(ctx.replyToMessage)
+  const customerTurn = quotedContext ? `${quotedContext}\n\nCustomer message:\n${ctx.body}` : ctx.body
+  const live = buildLiveSystem(agent, version, customerTurn)
   let handoffStarted = false
   const handoff = async (reason, reply, commercialContext = null) => {
     handoffStarted = true
     return handoffLiveAi(ctx, session, agent, reason, reply, commercialContext)
   }
-  const history = boundedHistory([...(session.messages || []), { role: 'user', content: ctx.body }])
-  const commercial = commercialTurn(live.configuration, ctx.body, history.slice(0, -1), session.commercial_context)
+  const history = boundedHistory([...(session.messages || []), { role: 'user', content: customerTurn }])
+  const commercial = commercialTurn(live.configuration, customerTurn, history.slice(0, -1), session.commercial_context)
   if (commercial?.kind === 'qualify') {
     await outgoing(ctx, commercial.reply)
     const messages = boundedHistory([...history, { role: 'assistant', content: commercial.reply }])

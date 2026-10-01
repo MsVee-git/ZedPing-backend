@@ -5,7 +5,7 @@ const { requireAdmin } = require('../middleware/auth')
 const { sendTextMessage, sendTemplateMessage } = require('../lib/whatsapp')
 const { transientRecipient, dedupeRecipients } = require('../lib/broadcastRecipients')
 const { loadWorkspaceTemplates } = require('../lib/workspaceTemplates')
-const { describeTemplate, resolveTemplateRecipients } = require('../lib/broadcastTemplates')
+const { describeTemplate, resolveTemplateRecipients, renderedTemplatePreview } = require('../lib/broadcastTemplates')
 const { MetaTemplateError } = require('../lib/metaTemplates')
 const { filterWorkspaceMarketingRecipients } = require('../lib/marketingOptOut')
 
@@ -133,7 +133,7 @@ router.post('/send-template', requireAdmin, async (req, res) => {
     for (const recipient of review.recipients) {
       try {
         const metaResult = await sendTemplateMessage(review.number.phone_number_id, recipient.phone_number, { name: review.template.name, language: review.template.language, components: recipient.template_components }, review.number.access_token)
-        await supabase.from('messages').insert({ customer_id: req.workspace.customerId, whatsapp_number_id: review.number.id, direction: 'outbound', to_number: recipient.phone_number, message_body: '[Template] ' + review.template.name + ' (' + review.template.language + ')', status: 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null, contact_id: recipient.id || null })
+        await supabase.from('messages').insert({ customer_id: req.workspace.customerId, whatsapp_number_id: review.number.id, direction: 'outbound', to_number: recipient.phone_number, message_body: renderedTemplatePreview(review.template, recipient.template_components), status: 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null, contact_id: recipient.id || null })
         results.push({ status: 'sent' })
       } catch (_) { results.push({ status: 'failed' }) }
     }
@@ -159,7 +159,11 @@ router.post('/send', requireAdmin, async (req, res) => {
     if (error) throw error
     const results = []
     for (const contact of marketing.eligible) {
-      try { await sendTextMessage(number.phone_number_id, contact.phone_number, body, number.access_token); results.push({ status: 'sent' }) } catch (_) { results.push({ status: 'failed' }) }
+      try {
+        const metaResult = await sendTextMessage(number.phone_number_id, contact.phone_number, body, number.access_token)
+        await supabase.from('messages').insert({ customer_id: req.workspace.customerId, whatsapp_number_id: number.id, direction: 'outbound', to_number: contact.phone_number, message_body: body, status: 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null, contact_id: contact.id || null })
+        results.push({ status: 'sent' })
+      } catch (_) { results.push({ status: 'failed' }) }
     }
     const accepted = results.filter((item) => item.status === 'sent').length
     const failed = results.length - accepted

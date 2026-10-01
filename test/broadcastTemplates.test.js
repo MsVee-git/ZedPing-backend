@@ -1,6 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { describeTemplate, resolveTemplateRecipients } = require('../lib/broadcastTemplates')
+const { describeTemplate, resolveTemplateRecipients, renderedTemplatePreview } = require('../lib/broadcastTemplates')
 const { sendTemplateMessage } = require('../lib/whatsapp')
 
 const template = { id: 'template-1', name: 'lead_followup', status: 'APPROVED', category: 'MARKETING', language: 'en_US', components: [{ type: 'BODY', text: 'Hello {{1}}, call us on {{2}}.' }] }
@@ -30,5 +30,10 @@ test('template parameter support is represented without invoking a Meta send in 
   assert.equal(typeof sendTemplateMessage, 'function')
   // No axios/mock invocation: this suite proves construction only and cannot
   // send a live WhatsApp message.
+})
+
+test('persisted campaign preview identifies the explicit template offer a customer replied to', () => {
+  const review = resolveTemplateRecipients(template, contacts, { 1: { source: 'contact_name' }, 2: { source: 'fixed', value: '+260000000000' } })
+  assert.equal(renderedTemplatePreview(review.template, review.recipients[0].template_components), 'Hello Ada, call us on +260000000000.')
 })
 

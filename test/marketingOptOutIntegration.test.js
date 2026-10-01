@@ -73,7 +73,13 @@ function loadRoute(file, db) {
     '../lib/workspaceTemplates': { async loadWorkspaceTemplates(workspace, number) { assert.equal(workspace, 'a'); assert.equal(number, 'number-a'); return catalog } },
     '../lib/conversationEvents': { async recordConversationEvent() {} },
     '../lib/automationExecution': { async recordAutomationEvent() {} },
-    '../lib/chatbotExecution': { async continueFlow() { routed.push('flow'); return false } }
+    '../lib/chatbotExecution': { async continueFlow() { routed.push('flow'); return false } },
+    // These are evaluated only on the Zoe path, which this opt-out suite
+    // deliberately instruments away below. Keep the route loader compatible
+    // with its current established imports without exercising Zoe itself.
+    '../lib/zoeCommercial': { commercialTurn() { return null }, commercialMetadata() { return null } },
+    '../lib/replyContext': { parseInboundReplyContext() { return null }, aiReplyContext() { return null } },
+    '../lib/inboundMedia': { parseInboundMedia(message) { return { body: message?.text?.body || '', media: null } } }
   }
   const real = new Set(['crypto', '../lib/marketingOptOut', '../lib/broadcastRecipients', '../lib/broadcastTemplates', '../lib/metaTemplates', '../lib/contactImport', '../lib/conversationState', '../lib/inboundWebhookEvents'])
   const context = {

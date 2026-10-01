@@ -31,3 +31,12 @@ test('broadcast setup exposes a human telephone label while preserving Meta IDs 
   assert.doesNotMatch(setupSection, /phone_number_id.*res\.json/)
   assert.match(source, /sendTemplateMessage\(review\.number\.phone_number_id/)
 })
+
+test('template and plain broadcasts persist their accepted Meta message IDs for explicit reply resolution', () => {
+  const templateSend = source.slice(source.indexOf("router.post('/send-template'"), source.indexOf("router.post('/send',"))
+  const plainSend = source.slice(source.indexOf("router.post('/send',"), source.indexOf("router.get('/scheduled'"))
+  assert.match(templateSend, /renderedTemplatePreview\(review\.template, recipient\.template_components\)/)
+  assert.match(templateSend, /meta_message_id: metaResult\?\.messages\?\.\[0\]\?\.id \|\| null/)
+  assert.match(plainSend, /const metaResult = await sendTextMessage/)
+  assert.match(plainSend, /meta_message_id: metaResult\?\.messages\?\.\[0\]\?\.id \|\| null/)
+})
