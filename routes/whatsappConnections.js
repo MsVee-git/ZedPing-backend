@@ -51,21 +51,54 @@ function provisioningView(connection) {
 
 function pin() { return crypto.randomInt(0, 1000000).toString().padStart(6, '0') }
 
+function signupAssetPatch(session, { phoneNumberId, finishWabaId, validatedWabaId = null }) {
+  const incomingWabaId = validatedWabaId || finishWabaId || null
+  if (session.signup_phone_number_id && session.signup_phone_number_id !== phoneNumberId) {
+    throw new MetaSignupError('This connection session already belongs to a different WhatsApp number')
+  }
+  if (session.signup_waba_id && incomingWabaId && session.signup_waba_id !== incomingWabaId) {
+    throw new MetaSignupError('This connection session already belongs to a different WhatsApp Business Account')
+  }
+  return {
+    signup_phone_number_id: phoneNumberId,
+    signup_waba_id: incomingWabaId || session.signup_waba_id || null
+  }
+}
+
+function isOperationalConnection(connection) {
+  return connection?.status === 'connected' || connection?.provisioning_state === 'operational'
+}
+
 async function loadCompletedConnection(session, customerId) {
   if (!session.whatsapp_number_id) return null
+  return loadConnection(session.whatsapp_number_id, customerId)
+}
+
+async function loadConnection(connectionId, customerId) {
   const { data } = await supabase
     .from('whatsapp_numbers')
     .select('id, customer_id, phone_number, phone_number_id, whatsapp_business_account_id, display_name, status, provisioning_state, provisioning_error, provisioned_at')
-    .eq('id', session.whatsapp_number_id)
+    .eq('id', connectionId)
     .eq('customer_id', customerId)
     .maybeSingle()
   return data || null
 }
 
+async function markSessionCompleted(session, customerId, connectionId) {
+  const { error } = await supabase
+    .from('whatsapp_connection_sessions')
+    .update({ completed_at: new Date().toISOString(), whatsapp_number_id: connectionId })
+    .eq('id', session.id)
+    .eq('customer_id', customerId)
+    .eq('created_by', session.created_by)
+    .is('completed_at', null)
+  if (error) throw error
+}
+
 async function findConflict(customerId, phoneNumberId, wabaId, phoneNumber) {
   const [{ data: byId }, { data: byWabaPhone }] = await Promise.all([
-    supabase.from('whatsapp_numbers').select('id, customer_id, phone_number_id, whatsapp_business_account_id, phone_number, display_name, status').eq('phone_number_id', phoneNumberId).maybeSingle(),
-    supabase.from('whatsapp_numbers').select('id, customer_id, phone_number_id, whatsapp_business_account_id, phone_number, display_name, status').eq('whatsapp_business_account_id', wabaId).eq('phone_number', phoneNumber).maybeSingle()
+    supabase.from('whatsapp_numbers').select('id, customer_id, phone_number_id, whatsapp_business_account_id, phone_number, display_name, status, provisioning_state, provisioning_error, provisioned_at, provisioning_attempts, provisioning_started_at').eq('phone_number_id', phoneNumberId).maybeSingle(),
+    supabase.from('whatsapp_numbers').select('id, customer_id, phone_number_id, whatsapp_business_account_id, phone_number, display_name, status, provisioning_state, provisioning_error, provisioned_at, provisioning_attempts, provisioning_started_at').eq('whatsapp_business_account_id', wabaId).eq('phone_number', phoneNumber).maybeSingle()
   ])
   const records = [byId, byWabaPhone].filter(Boolean)
   const foreign = records.find((record) => record.customer_id !== customerId)
@@ -110,7 +143,7 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
     const { session_id: sessionId, state, code, phone_number_id: phoneNumberId, finish_waba_id: finishWabaId } = req.body
     const { data: session } = await supabase
       .from('whatsapp_connection_sessions')
-      .select('id, customer_id, created_by, state_hash, expires_at, completed_at, whatsapp_number_id')
+      .select('id, customer_id, created_by, state_hash, expires_at, completed_at, whatsapp_number_id, signup_phone_number_id, signup_waba_id')
       .eq('id', sessionId)
       .maybeSingle()
 
@@ -124,11 +157,33 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
     }
     if (new Date(session.expires_at).getTime() <= Date.now()) return res.status(410).json({ error: 'This connection session has expired. Start again.' })
 
+    // Persist the event's identifiers only after its signed, workspace-scoped
+    // session has been verified. Meta ownership validation below replaces the
+    // claimed WABA with the WABA Meta proves for this phone number.
+    completionStage = 'signup_asset_capture'
+    const { error: capturedAssetsError } = await supabase
+      .from('whatsapp_connection_sessions')
+      .update(signupAssetPatch(session, { phoneNumberId, finishWabaId }))
+      .eq('id', session.id)
+      .eq('customer_id', req.workspace.customerId)
+      .eq('created_by', req.workspace.userId)
+      .is('completed_at', null)
+    if (capturedAssetsError) throw capturedAssetsError
+
     const meta = createMetaEmbeddedSignupClient()
     completionStage = 'oauth_code_exchange'
     const temporaryToken = await meta.exchangeCode(code)
     completionStage = 'ownership_validation'
     const validated = await meta.validatePhoneOwnership({ accessToken: temporaryToken, phoneNumberId, finishWabaId: finishWabaId || null })
+    completionStage = 'signup_asset_capture'
+    const { error: validatedAssetsError } = await supabase
+      .from('whatsapp_connection_sessions')
+      .update(signupAssetPatch(session, { phoneNumberId: validated.phoneNumberId, finishWabaId, validatedWabaId: validated.wabaId }))
+      .eq('id', session.id)
+      .eq('customer_id', req.workspace.customerId)
+      .eq('created_by', req.workspace.userId)
+      .is('completed_at', null)
+    if (validatedAssetsError) throw validatedAssetsError
     completionStage = 'whatsapp_number_persistence'
     const conflict = await findConflict(req.workspace.customerId, validated.phoneNumberId, validated.wabaId, validated.displayPhoneNumber)
     if (conflict.kind === 'foreign') {
@@ -152,7 +207,7 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
           display_name: validated.displayName,
           status: 'provisioning', provisioning_state: 'embedded_signup_completed', provisioning_attempts: 0, provisioning_started_at: new Date().toISOString()
         })
-        .select('id, customer_id, phone_number, phone_number_id, whatsapp_business_account_id, display_name, status, provisioning_state, provisioning_error, provisioned_at')
+        .select('id, customer_id, phone_number, phone_number_id, whatsapp_business_account_id, display_name, status, provisioning_state, provisioning_error, provisioned_at, provisioning_attempts, provisioning_started_at')
         .single()
       if (error) {
         if (error.code === '23505') return res.status(409).json({ error: 'This WhatsApp number is already connected to another workspace' })
@@ -163,21 +218,49 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
 
     // Legacy and already-operational connections are never reprovisioned by a
     // duplicate Embedded Signup completion.
-    if (connection.status === 'connected') {
-      await supabase.from('whatsapp_connection_sessions').update({ completed_at: new Date().toISOString(), whatsapp_number_id: connection.id }).eq('id', session.id).eq('customer_id', req.workspace.customerId).eq('created_by', req.workspace.userId).is('completed_at', null)
+    if (isOperationalConnection(connection)) {
+      await markSessionCompleted(session, req.workspace.customerId, connection.id)
       return res.json({ connection: provisioningView(connection), idempotent: true })
     }
+
+    // Claim a pending/failed connection before any Meta mutation. Concurrent
+    // duplicate completion requests can observe the claim, but cannot register
+    // the same number twice.
+    const { data: claimed, error: claimError } = await supabase
+      .from('whatsapp_numbers')
+      .update({
+        status: 'provisioning',
+        provisioning_state: 'registering',
+        provisioning_error: null,
+        provisioning_attempts: Number(connection.provisioning_attempts || 0) + 1,
+        provisioning_started_at: connection.provisioning_started_at || new Date().toISOString()
+      })
+      .eq('id', connection.id)
+      .eq('customer_id', req.workspace.customerId)
+      .eq('status', 'provisioning')
+      .in('provisioning_state', ['embedded_signup_completed', 'failed'])
+      .select('id, customer_id, phone_number, phone_number_id, whatsapp_business_account_id, display_name, status, provisioning_state, provisioning_error, provisioned_at, provisioning_attempts, provisioning_started_at')
+      .maybeSingle()
+    if (claimError) throw claimError
+    if (!claimed) {
+      const current = await loadConnection(connection.id, req.workspace.customerId)
+      if (isOperationalConnection(current)) {
+        await markSessionCompleted(session, req.workspace.customerId, current.id)
+        return res.json({ connection: provisioningView(current), idempotent: true })
+      }
+      return res.status(409).json({ error: 'WhatsApp provisioning is already in progress' })
+    }
+    connection = claimed
 
     // The exchanged Business Integration System User token is only retained in
     // the server-side vault. It is never returned, logged, or copied to the
     // legacy plaintext access_token field.
-    const vault = createCredentialVault()
-    const registrationPin = pin()
-    completionStage = 'credential_storage'
-    await vault.put({ customerId: req.workspace.customerId, integration: 'meta_whatsapp', credentialKey: `phone_${validated.phoneNumberId}`, plaintext: temporaryToken })
-    await vault.put({ customerId: req.workspace.customerId, integration: 'meta_whatsapp', credentialKey: `phone_${validated.phoneNumberId}_registration_pin`, plaintext: registrationPin })
-    await supabase.from('whatsapp_numbers').update({ status: 'provisioning', provisioning_state: 'registering', provisioning_error: null, provisioning_attempts: Number(connection.provisioning_attempts || 0) + 1, provisioning_started_at: connection.provisioning_started_at || new Date().toISOString() }).eq('id', connection.id).eq('customer_id', req.workspace.customerId)
     try {
+      const vault = createCredentialVault()
+      const registrationPin = pin()
+      completionStage = 'credential_storage'
+      await vault.put({ customerId: req.workspace.customerId, integration: 'meta_whatsapp', credentialKey: `phone_${validated.phoneNumberId}`, plaintext: temporaryToken })
+      await vault.put({ customerId: req.workspace.customerId, integration: 'meta_whatsapp', credentialKey: `phone_${validated.phoneNumberId}_registration_pin`, plaintext: registrationPin })
       completionStage = 'waba_subscription'
       await meta.subscribeApp(validated.wabaId, temporaryToken)
       completionStage = 'phone_registration'
@@ -194,14 +277,7 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
       return res.status(422).json({ error: 'WhatsApp provisioning needs attention. You can retry safely.', connection: { ...provisioningView(connection), status: 'provisioning', provisioning_state: 'failed', provisioning_error: 'registration_failed' } })
     }
 
-    const { error: sessionError } = await supabase
-      .from('whatsapp_connection_sessions')
-      .update({ completed_at: new Date().toISOString(), whatsapp_number_id: connection.id })
-      .eq('id', session.id)
-      .eq('customer_id', req.workspace.customerId)
-      .eq('created_by', req.workspace.userId)
-      .is('completed_at', null)
-    if (sessionError) throw sessionError
+    await markSessionCompleted(session, req.workspace.customerId, connection.id)
 
     return res.status(201).json({ connection: provisioningView(connection), idempotent: Boolean(conflict.record) })
   } catch (error) {
@@ -245,3 +321,5 @@ router.post('/:id/provision/retry', requireAdmin, async (req, res) => {
 })
 
 module.exports = router
+module.exports.signupAssetPatch = signupAssetPatch
+module.exports.isOperationalConnection = isOperationalConnection

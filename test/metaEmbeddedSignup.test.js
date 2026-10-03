@@ -55,6 +55,56 @@ test('rejects an invalid Meta access grant with no WhatsApp Business Account sco
   await assert.rejects(() => client.validatePhoneOwnership({ accessToken: 'temporary-token', phoneNumberId: '200' }), MetaSignupError)
 })
 
+test('rejects an explicitly invalid exchanged Meta token before it is used for ownership discovery', async () => {
+  const client = createMetaEmbeddedSignupClient({
+    env,
+    http: {
+      async get() {
+        return { data: { data: { is_valid: false, granular_scopes: [{ scope: 'whatsapp_business_management', target_ids: ['100'] }] } } }
+      }
+    }
+  })
+  await assert.rejects(() => client.validatePhoneOwnership({ accessToken: 'temporary-token', phoneNumberId: '200' }), /did not validate/)
+})
+
+test('finds a selected phone on a later bounded Meta phone-number page', async () => {
+  const calls = []
+  const client = createMetaEmbeddedSignupClient({
+    env,
+    http: {
+      async get(url, options = {}) {
+        if (url.includes('debug_token')) return { data: { data: { is_valid: true, granular_scopes: [{ scope: 'whatsapp_business_management', target_ids: ['100'] }] } } }
+        calls.push(options.params)
+        if (!options.params.after) return { data: { data: [{ id: '111', display_phone_number: '+260 700 000 111' }], paging: { cursors: { after: 'next-page' } } } }
+        return { data: { data: [{ id: '200', display_phone_number: '+260 700 000 200', verified_name: 'Example' }] } }
+      }
+    }
+  })
+  const connection = await client.validatePhoneOwnership({ accessToken: 'temporary-token', phoneNumberId: '200' })
+  assert.equal(connection.phoneNumberId, '200')
+  assert.deepEqual(calls.map(call => call.after || null), [null, 'next-page'])
+})
+
+test('retries an empty read-only phone list a bounded number of times before ownership succeeds', async () => {
+  let phoneListCalls = 0
+  const delays = []
+  const client = createMetaEmbeddedSignupClient({
+    env,
+    delay: async milliseconds => { delays.push(milliseconds) },
+    http: {
+      async get(url) {
+        if (url.includes('debug_token')) return { data: { data: { is_valid: true, granular_scopes: [{ scope: 'whatsapp_business_management', target_ids: ['100'] }] } } }
+        phoneListCalls += 1
+        return { data: { data: phoneListCalls < 3 ? [] : [{ id: '200', display_phone_number: '+260 700 000 200' }] } }
+      }
+    }
+  })
+  const connection = await client.validatePhoneOwnership({ accessToken: 'temporary-token', phoneNumberId: '200' })
+  assert.equal(connection.phoneNumberId, '200')
+  assert.equal(phoneListCalls, 3)
+  assert.deepEqual(delays, [250, 250])
+})
+
 test('requires Meta webhook subscription confirmation before a connection can succeed', async () => {
   const client = createMetaEmbeddedSignupClient({
     env,
@@ -339,17 +389,18 @@ test('records an absent FINISH WABA claim without identifiers', async () => {
 })
 
 test('records an unauthorized FINISH WABA claim without trusting it', async () => {
-  const record = await ownershipDiagnostic({
+  const { client, diagnostics } = transactionDiagnosticClient({
     finishWabaId: '667788990011',
-    phoneLists: {
-      993311773355: [{ id: '555500001111', display_phone_number: '+260700111222' }],
-      884422119977: [{ id: '555500001111', display_phone_number: '+260700111222' }]
-    }
+    phoneLists: {}
   })
-  assert.equal(record.finish_waba_present, true)
-  assert.equal(record.finish_waba_is_authorized_candidate, false)
-  assert.equal(record.finish_waba_lists_selected_phone, false)
-  assert.equal(record.finish_waba_disambiguates_multiple_matches, false)
+  await assert.rejects(() => client.validatePhoneOwnership({
+    accessToken: 'temporary-access-token-should-never-appear',
+    phoneNumberId: '555500001111',
+    finishWabaId: '667788990011'
+  }), /did not authorize/)
+  const record = diagnostics.find((entry) => entry.stage === 'token_waba_authorization')
+  assert.equal(record.success, true)
+  assert.equal(JSON.stringify(record).includes('667788990011'), false)
 })
 
 test('records an authorized FINISH WABA that does not list the selected phone', async () => {
@@ -363,23 +414,30 @@ test('records an authorized FINISH WABA that does not list the selected phone', 
   assert.equal(record.finish_waba_present, true)
   assert.equal(record.finish_waba_is_authorized_candidate, true)
   assert.equal(record.finish_waba_lists_selected_phone, false)
-  assert.equal(record.selected_phone_authorized_waba_match_count, 1)
+  assert.equal(record.selected_phone_authorized_waba_match_count, 0)
   assert.equal(record.finish_waba_disambiguates_multiple_matches, false)
 })
 
-test('records a FINISH WABA that selects one of multiple authorized phone matches without bypassing validation', async () => {
-  const record = await ownershipDiagnostic({
+test('uses an authorized FINISH WABA to resolve the selected phone mapping', async () => {
+  const { client, diagnostics } = transactionDiagnosticClient({
     finishWabaId: '993311773355',
     phoneLists: {
       993311773355: [{ id: '555500001111', display_phone_number: '+260700111222' }],
       884422119977: [{ id: '555500001111', display_phone_number: '+260700111222' }]
     }
   })
+  const connection = await client.validatePhoneOwnership({
+    accessToken: 'temporary-access-token-should-never-appear',
+    phoneNumberId: '555500001111',
+    finishWabaId: '993311773355'
+  })
+  assert.equal(connection.wabaId, '993311773355')
+  const record = diagnostics.find((entry) => entry.stage === 'phone_ownership_lookup')
   assert.equal(record.finish_waba_present, true)
   assert.equal(record.finish_waba_is_authorized_candidate, true)
   assert.equal(record.finish_waba_lists_selected_phone, true)
-  assert.equal(record.selected_phone_authorized_waba_match_count, 2)
-  assert.equal(record.finish_waba_disambiguates_multiple_matches, true)
+  assert.equal(record.selected_phone_authorized_waba_match_count, 1)
+  assert.equal(record.finish_waba_disambiguates_multiple_matches, false)
   const output = JSON.stringify(record)
   for (const sensitiveValue of ['993311773355', '884422119977', '555500001111', '+260700111222', 'temporary-access-token-should-never-appear']) {
     assert.equal(output.includes(sensitiveValue), false)
