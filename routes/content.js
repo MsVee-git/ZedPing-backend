@@ -1,3 +1,4 @@
+const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
 const express = require('express')
 const multer = require('multer')
 const router = express.Router()
@@ -17,7 +18,7 @@ function parseUpload(req, res, next) {
 
 async function activeNumber(customerId) {
   const { data, error } = await supabase.from('whatsapp_numbers')
-    .select('id, customer_id, phone_number_id, whatsapp_business_account_id, access_token, display_name, status')
+    .select('id, customer_id, phone_number_id, whatsapp_business_account_id, access_token, display_name, status, provisioning_state, provisioned_at')
     .eq('customer_id', customerId).eq('status', 'connected')
   if (error) throw error
   if (!data?.length) return null
@@ -30,7 +31,7 @@ async function validatedTemplate(customerId, id) {
   const number = await activeNumber(customerId)
   if (!number) throw new Error('No connected WhatsApp number is available for this workspace')
   const meta = createMetaTemplateClient()
-  const templates = await meta.listTemplates({ wabaId: number.whatsapp_business_account_id, accessToken: number.access_token })
+  const templates = await meta.listTemplates({ wabaId: number.whatsapp_business_account_id, accessToken: await resolveWhatsAppAccessToken(number, { customerId }) })
   const template = templates.find((entry) => String(entry.id) === id)
   if (!template) throw new Error('This WhatsApp template is not available in the active workspace')
   return template
@@ -273,4 +274,5 @@ router.get('/:id/download', async (req, res) => {
 })
 
 module.exports = router
+
 
