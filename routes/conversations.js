@@ -1,3 +1,4 @@
+const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
 const express = require('express')
 const multer = require('multer')
 const router = express.Router()
@@ -9,10 +10,8 @@ const { mayResolve } = require('../lib/conversationState')
 const { recordConversationEvent } = require('../lib/conversationEvents')
 const { handoffActiveFlowForConversation } = require('../lib/chatbotExecution')
 const { closeActiveAiSessionsForConversation } = require('../lib/aiAgentSessions')
-const { createCredentialVault, CredentialVaultError } = require('../lib/credentialVault')
 const { storedInboundAttachment, publicInboundMedia } = require('../lib/inboundMedia')
 const { fetchWhatsAppMedia, WhatsAppMediaError } = require('../lib/whatsappMedia')
-const { configuredAccessToken } = require('../lib/whatsapp')
 const { validateOutboundUpload, parseLocation, storedAttachment, publicMessageMedia } = require('../lib/conversationMedia')
 
 function parseConversationUpload(req, res, next) {
@@ -102,22 +101,6 @@ function logConversationDetailFailure(req, stage, error) {
     error_code: safeDiagnosticCode(error),
     undefined_identifier: safeUndefinedIdentifier(error)
   }))
-}
-
-async function mediaAccessToken(number) {
-  try {
-    const vault = createCredentialVault()
-    const stored = await vault.get({ customerId: number.customer_id, integration: 'meta_whatsapp', credentialKey: `phone_${number.phone_number_id}` })
-    if (stored) return stored
-  } catch (error) {
-    // Connected legacy numbers retain their existing server-only credential
-    // path. A missing vault configuration must not expose any error detail.
-    if (!(error instanceof CredentialVaultError)) throw error
-  }
-  // Legacy connected numbers use the same backend-only app credential that
-  // existing outbound WhatsApp delivery uses. The route has already scoped the
-  // conversation, message and connected number to the authenticated workspace.
-  return configuredAccessToken(number.access_token)
 }
 
 async function memberForWorkspace(customerId, userId) {
@@ -278,14 +261,14 @@ router.get('/:id/messages/:messageId/media', async (req, res) => {
     const attachment = message?.direction === 'inbound' ? storedInboundAttachment(message.inbound_media) : storedAttachment(message?.outbound_media)
     if (!attachment) return res.status(404).json({ error: 'Attachment is unavailable' })
     const { data: number, error: numberError } = await supabase.from('whatsapp_numbers')
-      .select('id,customer_id,phone_number_id,access_token,status')
+      .select('id,customer_id,phone_number_id,access_token,status,provisioning_state,provisioned_at')
       .eq('id', message.whatsapp_number_id)
       .eq('customer_id', req.workspace.customerId)
       .eq('status', 'connected')
       .maybeSingle()
     if (numberError) throw numberError
     if (!number) return res.status(404).json({ error: 'Attachment is unavailable' })
-    const accessToken = await mediaAccessToken(number)
+    const accessToken = await resolveWhatsAppAccessToken(number, { customerId: req.workspace.customerId })
     if (!accessToken) return res.status(404).json({ error: 'Attachment is unavailable' })
     const media = await fetchWhatsAppMedia({ mediaId: attachment.mediaId, accessToken, expectedType: attachment.type })
     const mimeType = media.mimeType || attachment.mimeType || 'application/octet-stream'
@@ -461,12 +444,12 @@ router.post('/:id/reply', async (req, res) => {
     if (contactError) throw contactError
     if (!contact) return res.status(409).json({ error: 'This conversation has no valid contact' })
     const { data: number, error: numberError } = await supabase.from('whatsapp_numbers')
-      .select('id,phone_number_id,access_token').eq('id', conversation.whatsapp_number_id).eq('customer_id', req.workspace.customerId).eq('status', 'connected').maybeSingle()
+      .select('id,customer_id,phone_number_id,access_token,provisioning_state,provisioned_at').eq('id', conversation.whatsapp_number_id).eq('customer_id', req.workspace.customerId).eq('status', 'connected').maybeSingle()
     if (numberError) throw numberError
     if (!number) return res.status(409).json({ error: 'The WhatsApp connection for this conversation is unavailable' })
     replyTo = await resolveOutgoingReplyContext(req.workspace.customerId, conversation, req.body?.reply_to_message_id)
 
-    const result = await sendTextMessage(number.phone_number_id, contact.phone_number, message, number.access_token, replyTo?.meta_message_id)
+    const result = await sendTextMessage(number.phone_number_id, contact.phone_number, message, await resolveWhatsAppAccessToken(number, { customerId: req.workspace.customerId }), replyTo?.meta_message_id)
     const now = new Date().toISOString()
     const { error: messageError } = await supabase.from('messages').insert({
       customer_id: req.workspace.customerId,
@@ -526,7 +509,7 @@ async function humanReplyTarget(req) {
   if (contactError) throw contactError
   if (!contact) { const error = new Error('This conversation has no valid contact'); error.status = 409; throw error }
   const { data: number, error: numberError } = await supabase.from('whatsapp_numbers')
-    .select('id,customer_id,phone_number_id,access_token').eq('id', conversation.whatsapp_number_id).eq('customer_id', req.workspace.customerId).eq('status', 'connected').maybeSingle()
+    .select('id,customer_id,phone_number_id,access_token,provisioning_state,provisioned_at').eq('id', conversation.whatsapp_number_id).eq('customer_id', req.workspace.customerId).eq('status', 'connected').maybeSingle()
   if (numberError) throw numberError
   if (!number) { const error = new Error('The WhatsApp connection for this conversation is unavailable'); error.status = 409; throw error }
   return { conversation, contact, number }
@@ -553,7 +536,7 @@ router.post('/:id/media', parseConversationUpload, async (req, res) => {
     target = await humanReplyTarget(req)
     const replyTo = await resolveOutgoingReplyContext(req.workspace.customerId, target.conversation, req.body?.reply_to_message_id)
     const attachment = validateOutboundUpload(req.file, String(req.body?.type || '').toLowerCase(), req.body?.caption)
-    const accessToken = await mediaAccessToken(target.number)
+    const accessToken = await resolveWhatsAppAccessToken(target.number, { customerId: req.workspace.customerId })
     if (!accessToken) return res.status(409).json({ error: 'The WhatsApp connection for this conversation is unavailable' })
     const mediaId = await uploadWhatsAppMedia(target.number.phone_number_id, { ...attachment.file, mimetype: attachment.mime_type, originalname: attachment.filename }, accessToken)
     const metaResult = attachment.type === 'image'
@@ -572,7 +555,7 @@ router.post('/:id/location', async (req, res) => {
     const target = await humanReplyTarget(req)
     const replyTo = await resolveOutgoingReplyContext(req.workspace.customerId, target.conversation, req.body?.reply_to_message_id)
     const location = parseLocation(req.body)
-    const accessToken = await mediaAccessToken(target.number)
+    const accessToken = await resolveWhatsAppAccessToken(target.number, { customerId: req.workspace.customerId })
     if (!accessToken) return res.status(409).json({ error: 'The WhatsApp connection for this conversation is unavailable' })
     const metaResult = await sendLocationMessage(target.number.phone_number_id, target.contact.phone_number, location, accessToken, replyTo?.meta_message_id)
     const conversation = await recordHumanRichMessage({ workspace: req.workspace, target, messageBody: null, media: location, metaResult, eventType: 'human_location_sent', replyTo })
@@ -583,3 +566,4 @@ router.post('/:id/location', async (req, res) => {
 })
 
 module.exports = router
+

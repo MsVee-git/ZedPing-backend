@@ -1,3 +1,4 @@
+const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
 const express = require('express')
 const multer = require('multer')
 const router = express.Router()
@@ -97,7 +98,7 @@ router.post('/', requireAdmin, parseTemplateUpload, async (req, res) => {
     const meta = createMetaTemplateClient()
     const submitted = await meta.createTemplate({
       wabaId: resolved.number.whatsapp_business_account_id,
-      accessToken: resolved.number.access_token,
+      accessToken: await resolveWhatsAppAccessToken(resolved.number, { customerId: req.workspace.customerId }),
       template: templateInput
     })
     const validated = meta.buildTemplateSubmission(templateInput, { headerHandle: ['image', 'document'].includes(templateInput.header_type) ? 'uploaded-by-meta' : null })
@@ -147,7 +148,7 @@ router.delete('/', requireAdmin, async (req, res) => {
 
     await result.meta.deleteTemplate({
       wabaId: result.number.whatsapp_business_account_id,
-      accessToken: result.number.access_token,
+      accessToken: await resolveWhatsAppAccessToken(result.number, { customerId: req.workspace.customerId }),
       templateName: template.name
     })
     return res.json({ success: true, template: { id: String(template.id), name: template.name } })
@@ -183,12 +184,13 @@ router.post('/send', requireAdmin, parseTemplateUpload, async (req, res) => {
     const mediaType = headerMediaFormat(approved)
     if (mediaType && !req.file) return res.status(400).json({ error: 'Select the required ' + mediaType + ' header media before sending' })
     if (!mediaType && req.file) return res.status(400).json({ error: 'This template does not use media header content' })
-    const mediaId = mediaType ? await uploadWhatsAppMedia(result.number.phone_number_id, validHeaderMedia(req.file, mediaType), result.number.access_token) : null
+    const accessToken = await resolveWhatsAppAccessToken(result.number, { customerId: req.workspace.customerId })
+    const mediaId = mediaType ? await uploadWhatsAppMedia(result.number.phone_number_id, validHeaderMedia(req.file, mediaType), accessToken) : null
     const metaResult = await sendTemplateMessage(
       result.number.phone_number_id,
       recipient,
       { name: approved.name, language: approved.language, headerMedia: mediaType ? { type: mediaType, id: mediaId } : null },
-      result.number.access_token
+      accessToken
     )
     const metaMessageId = metaResult?.messages?.[0]?.id || null
     const { error: insertError } = await supabase.from('messages').insert({
@@ -210,4 +212,5 @@ router.post('/send', requireAdmin, parseTemplateUpload, async (req, res) => {
 })
 
 module.exports = router
+
 

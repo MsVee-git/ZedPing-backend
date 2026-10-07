@@ -1,3 +1,4 @@
+const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
 const express = require('express')
 const crypto = require('crypto')
 const router = express.Router()
@@ -218,7 +219,7 @@ async function processMessage(ctx) {
 }
 
 async function outgoing(ctx, body) {
-  const result = await sendTextMessage(ctx.number.phone_number_id, ctx.from, body, ctx.number.access_token)
+  const result = await sendTextMessage(ctx.number.phone_number_id, ctx.from, body, await resolveWhatsAppAccessToken(ctx.number, { customerId: ctx.customerId }))
   const now = new Date().toISOString()
   const { data: message, error } = await supabase.from('messages').insert({
     customer_id: ctx.customerId,
@@ -539,4 +540,5 @@ async function checkAISession(ctx) {
 }
 
 module.exports = router
+
 

@@ -63,7 +63,7 @@ test('resolution and AI paths are explicitly tenant, number, conversation and id
 
 test('conversation-detail diagnostics identify a safe failure stage without serializing request or message secrets', () => {
   const conversations = fs.readFileSync(path.join(__dirname, '..', 'routes', 'conversations.js'), 'utf8')
-  const diagnostics = conversations.slice(conversations.indexOf('function safeDiagnosticCode'), conversations.indexOf('async function mediaAccessToken'))
+  const diagnostics = conversations.slice(conversations.indexOf('function safeDiagnosticCode'), conversations.indexOf('async function memberForWorkspace'))
   const sandbox = {}
   vm.runInNewContext(`${diagnostics}\nthis.safeUndefinedIdentifier = safeUndefinedIdentifier`, sandbox)
   assert.match(diagnostics, /conversation_detail_load_failed/)
@@ -94,3 +94,4 @@ test('reply-context migration is atomic, rerunnable, and revokes the zero-argume
   assert.match(migration, /same workspace, WhatsApp number, and conversation/)
   assert.match(migration, /commit;\s*$/)
 })
+

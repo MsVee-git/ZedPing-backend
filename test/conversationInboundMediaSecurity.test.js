@@ -16,8 +16,9 @@ test('media proxy requires a workspace-owned conversation and workspace-owned me
 test('media proxy resolves the message-bound connected number and never serializes credentials', () => {
   assert.ok(source.includes(".eq('id', message.whatsapp_number_id)"))
   assert.ok(source.includes(".eq('status', 'connected')"))
-  assert.ok(source.includes("credentialKey: `phone_${number.phone_number_id}`"))
+  assert.ok(source.includes('resolveWhatsAppAccessToken(number, { customerId: req.workspace.customerId })'))
   assert.ok(source.includes("'Cache-Control': 'private, no-store'"))
   assert.equal(source.includes('access_token: accessToken'), false)
   assert.equal(source.includes('res.json({ accessToken'), false)
 })
+
