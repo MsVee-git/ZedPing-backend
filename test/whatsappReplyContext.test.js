@@ -2,6 +2,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+const vm = require('node:vm')
 const axios = require('axios')
 const { parseInboundReplyContext, messageReplyPreview, aiReplyContext, matchingReplyMessage } = require('../lib/replyContext')
 const { sendTextMessage, sendImageMessage } = require('../lib/whatsapp')
@@ -63,10 +64,16 @@ test('resolution and AI paths are explicitly tenant, number, conversation and id
 test('conversation-detail diagnostics identify a safe failure stage without serializing request or message secrets', () => {
   const conversations = fs.readFileSync(path.join(__dirname, '..', 'routes', 'conversations.js'), 'utf8')
   const diagnostics = conversations.slice(conversations.indexOf('function safeDiagnosticCode'), conversations.indexOf('async function mediaAccessToken'))
+  const sandbox = {}
+  vm.runInNewContext(`${diagnostics}\nthis.safeUndefinedIdentifier = safeUndefinedIdentifier`, sandbox)
   assert.match(diagnostics, /conversation_detail_load_failed/)
   for (const stage of ['authorization_workspace_resolution', 'conversation_lookup', 'whatsapp_number_resolution', 'normal_messages_query', 'reply_parent_lookup', 'rich_media_transformation', 'reply_preview_construction', 'final_response_construction']) assert.match(conversations, new RegExp(`'${stage}'`))
   assert.match(diagnostics, /error_code: safeDiagnosticCode\(error\)/)
-  assert.doesNotMatch(diagnostics, /error\.message|access_token|authorization|meta_message_id|message_body/)
+  assert.match(diagnostics, /undefined_identifier: safeUndefinedIdentifier\(error\)/)
+  assert.equal(sandbox.safeUndefinedIdentifier({ code: '42703', message: 'column "outbound_media" does not exist' }), 'outbound_media')
+  assert.equal(sandbox.safeUndefinedIdentifier({ code: '42703', details: 'customer message: secret' }), null)
+  assert.equal(sandbox.safeUndefinedIdentifier({ code: '42501', message: 'column "outbound_media" does not exist' }), null)
+  assert.doesNotMatch(diagnostics, /error_message|error_details|error_hint|access_token|authorization|meta_message_id|message_body/)
 })
 
 test('quote context remains reference context, not a knowledge authorization bypass', () => {

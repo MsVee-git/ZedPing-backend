@@ -82,6 +82,15 @@ function safeDiagnosticCode(error) {
   return /^[A-Za-z0-9_:-]{1,64}$/.test(value) ? value : 'unknown'
 }
 
+function safeUndefinedIdentifier(error) {
+  if (safeDiagnosticCode(error) !== '42703') return null
+  // PostgreSQL's undefined-column form names only a schema identifier. Parse
+  // that allowlisted token without serializing any raw database error field.
+  const raw = String(error?.message || error?.details || error?.hint || '')
+  const match = raw.match(/\b(?:column|identifier)\s+["']?([A-Za-z_][A-Za-z0-9_$]{0,62}(?:\.[A-Za-z_][A-Za-z0-9_$]{0,62})?)["']?\s+(?:does not exist|is undefined)\b/i)
+  return match?.[1] || null
+}
+
 function logConversationDetailFailure(req, stage, error) {
   // Keep this useful in Railway without recording request data, message data,
   // credentials, or raw upstream error text.
@@ -90,7 +99,8 @@ function logConversationDetailFailure(req, stage, error) {
     stage,
     workspace_id: req.workspace?.customerId || null,
     conversation_id: req.params?.id || null,
-    error_code: safeDiagnosticCode(error)
+    error_code: safeDiagnosticCode(error),
+    undefined_identifier: safeUndefinedIdentifier(error)
   }))
 }
 

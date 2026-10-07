@@ -1,0 +1,15 @@
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
+
+test('Embedded Signup asset-capture migration is additive and keeps credentials out of the session table', () => {
+  const sql = fs.readFileSync(path.join(__dirname, '../supabase/migrations/20261003100000_capture_embedded_signup_assets.sql'), 'utf8')
+  assert.match(sql, /begin;/i)
+  assert.match(sql, /add column if not exists signup_phone_number_id text/i)
+  assert.match(sql, /add column if not exists signup_waba_id text/i)
+  assert.match(sql, /check \(signup_phone_number_id is null or signup_phone_number_id ~ '\^\[0-9\]\{5,32\}\$'\)/i)
+  assert.match(sql, /check \(signup_waba_id is null or signup_waba_id ~ '\^\[0-9\]\{5,32\}\$'\)/i)
+  assert.doesNotMatch(sql, /access_token|registration_pin|ciphertext/i)
+  assert.match(sql, /commit;/i)
+})
