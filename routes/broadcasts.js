@@ -1,3 +1,4 @@
+const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
 const express = require('express')
 const router = express.Router()
 const supabase = require('../lib/supabase')
@@ -127,12 +128,13 @@ router.post('/send-template', requireAdmin, async (req, res) => {
     if (review.error) return res.status(review.status || 400).json({ error: review.error })
     if (!review.eligible_recipients) return res.status(400).json({ error: 'No recipients can receive this template.' })
     if (review.skipped_recipients) return res.status(400).json({ error: 'Resolve all required template values before sending.' })
+    const accessToken = await resolveWhatsAppAccessToken(review.number, { customerId: req.workspace.customerId })
     const { data: activity, error: activityError } = await supabase.from('scheduled_broadcasts').insert({ customer_id: req.workspace.customerId, broadcast_name: String(req.body?.broadcast_name || review.template.name).trim().slice(0, 160) || review.template.name, contacts: review.recipients.map(({ id, name, phone_number }) => ({ id, name, phone_number })), message: '[Template] ' + review.template.name + ' (' + review.template.language + ')', phone_number_id: review.number.phone_number_id, scheduled_at: new Date().toISOString(), status: 'sending' }).select().single()
     if (activityError) throw activityError
     const results = []
     for (const recipient of review.recipients) {
       try {
-        const metaResult = await sendTemplateMessage(review.number.phone_number_id, recipient.phone_number, { name: review.template.name, language: review.template.language, components: recipient.template_components }, review.number.access_token)
+        const metaResult = await sendTemplateMessage(review.number.phone_number_id, recipient.phone_number, { name: review.template.name, language: review.template.language, components: recipient.template_components }, accessToken)
         await supabase.from('messages').insert({ customer_id: req.workspace.customerId, whatsapp_number_id: review.number.id, direction: 'outbound', to_number: recipient.phone_number, message_body: renderedTemplatePreview(review.template, recipient.template_components), status: 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null, contact_id: recipient.id || null })
         results.push({ status: 'sent' })
       } catch (_) { results.push({ status: 'failed' }) }
@@ -155,12 +157,13 @@ router.post('/send', requireAdmin, async (req, res) => {
     const marketing = await filterWorkspaceMarketingRecipients(supabase, req.workspace.customerId, resolved.recipients)
     if (!marketing.eligible.length) return res.status(400).json({ error: 'No recipients can receive this broadcast.', opted_out_recipients: marketing.optedOut.length })
     const body = String(message).trim()
+    const accessToken = await resolveWhatsAppAccessToken(number, { customerId: req.workspace.customerId })
     const { data: activity, error } = await supabase.from('scheduled_broadcasts').insert({ customer_id: req.workspace.customerId, broadcast_name: String(req.body.broadcast_name || 'Immediate Broadcast').trim().slice(0, 160) || 'Immediate Broadcast', contacts: marketing.eligible, message: body, phone_number_id: number.phone_number_id, scheduled_at: new Date().toISOString(), status: 'sending' }).select().single()
     if (error) throw error
     const results = []
     for (const contact of marketing.eligible) {
       try {
-        const metaResult = await sendTextMessage(number.phone_number_id, contact.phone_number, body, number.access_token)
+        const metaResult = await sendTextMessage(number.phone_number_id, contact.phone_number, body, accessToken)
         await supabase.from('messages').insert({ customer_id: req.workspace.customerId, whatsapp_number_id: number.id, direction: 'outbound', to_number: contact.phone_number, message_body: body, status: 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null, contact_id: contact.id || null })
         results.push({ status: 'sent' })
       } catch (_) { results.push({ status: 'failed' }) }
@@ -192,4 +195,5 @@ router.get('/scheduled/:id', async (req, res) => {
 })
 
 module.exports = router
+
 
