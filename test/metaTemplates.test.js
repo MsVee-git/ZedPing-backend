@@ -1,6 +1,6 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { createMetaTemplateClient, MetaTemplateError } = require('./metaTemplates')
+const { createMetaTemplateClient, MetaTemplateError } = require('../lib/metaTemplates')
 
 const env = { META_GRAPH_API_VERSION: 'v25.0', META_ACCESS_TOKEN: 'server-only-token' }
 
@@ -107,4 +107,5 @@ test('uploads a template header sample through the server-side Meta app upload f
   assert.match(calls[0].url, /\/v25\.0\/1234567890\/uploads$/)
   assert.equal(calls[1].config.headers.Authorization, 'OAuth server-only-token')
 })
+
 
