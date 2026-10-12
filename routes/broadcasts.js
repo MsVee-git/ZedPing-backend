@@ -1,3 +1,4 @@
+const { sendWorkspaceText, sendWorkspaceTemplate, uploadWorkspaceMedia } = require('../lib/whatsappRuntime')
 const multer = require('multer')
 const { validateTemplateHeaderMedia } = require('../lib/templateMedia')
 const mediaUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } })
@@ -145,14 +146,13 @@ router.post('/send-template', requireAdmin, parseBroadcastUpload, async (req, re
     const needsMedia = ['image', 'document'].includes(mediaType)
     if (needsMedia) req.file = validateTemplateHeaderMedia(req.file, mediaType)
     if (!needsMedia && req.file) return res.status(400).json({ error: 'This template does not use header media.' })
-    const accessToken = await resolveWhatsAppAccessToken(review.number, { customerId: req.workspace.customerId })
-    const mediaId = needsMedia ? await uploadWhatsAppMedia(review.number.phone_number_id, req.file, accessToken) : null
+    const mediaId = needsMedia ? await uploadWorkspaceMedia({number:review.number,customerId:req.workspace.customerId,file:req.file}) : null
     const { data: activity, error: activityError } = await supabase.from('scheduled_broadcasts').insert({ customer_id: req.workspace.customerId, broadcast_name: String(req.body?.broadcast_name || review.template.name).trim().slice(0, 160) || review.template.name, contacts: review.recipients.map(({ id, name, phone_number }) => ({ id, name, phone_number })), message: '[Template] ' + review.template.name + ' (' + review.template.language + ')', phone_number_id: review.number.phone_number_id, scheduled_at: new Date().toISOString(), status: 'sending' }).select().single()
     if (activityError) throw activityError
     const results = []
     for (const recipient of review.recipients) {
       try {
-        const metaResult = await sendTemplateMessage(review.number.phone_number_id, recipient.phone_number, { name: review.template.name, language: review.template.language, components: recipient.template_components, ...(mediaId ? { headerMedia: { type: mediaType, id: mediaId } } : {}) }, accessToken)
+        const metaResult = await sendWorkspaceTemplate({number:review.number,customerId:req.workspace.customerId,to:recipient.phone_number,category:review.template.category,template:{ name: review.template.name, language: review.template.language, components: recipient.template_components, ...(mediaId ? { headerMedia: { type: mediaType, id: mediaId } } : {}) }})
         await supabase.from('messages').insert({ customer_id: req.workspace.customerId, whatsapp_number_id: review.number.id, direction: 'outbound', to_number: recipient.phone_number, message_body: renderedTemplatePreview(review.template, recipient.template_components), status: 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null, contact_id: recipient.id || null })
         results.push({ status: 'sent' })
       } catch (_) { results.push({ status: 'failed' }) }
@@ -175,13 +175,12 @@ router.post('/send', requireAdmin, async (req, res) => {
     const marketing = await filterWorkspaceMarketingRecipients(supabase, req.workspace.customerId, resolved.recipients)
     if (!marketing.eligible.length) return res.status(400).json({ error: 'No recipients can receive this broadcast.', opted_out_recipients: marketing.optedOut.length })
     const body = String(message).trim()
-    const accessToken = await resolveWhatsAppAccessToken(number, { customerId: req.workspace.customerId })
     const { data: activity, error } = await supabase.from('scheduled_broadcasts').insert({ customer_id: req.workspace.customerId, broadcast_name: String(req.body.broadcast_name || 'Immediate Broadcast').trim().slice(0, 160) || 'Immediate Broadcast', contacts: marketing.eligible, message: body, phone_number_id: number.phone_number_id, scheduled_at: new Date().toISOString(), status: 'sending' }).select().single()
     if (error) throw error
     const results = []
     for (const contact of marketing.eligible) {
       try {
-        const metaResult = await sendTextMessage(number.phone_number_id, contact.phone_number, body, accessToken)
+        const metaResult = await sendWorkspaceText({number,customerId:req.workspace.customerId,to:contact.phone_number,body})
         await supabase.from('messages').insert({ customer_id: req.workspace.customerId, whatsapp_number_id: number.id, direction: 'outbound', to_number: contact.phone_number, message_body: body, status: 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null, contact_id: contact.id || null })
         results.push({ status: 'sent' })
       } catch (_) { results.push({ status: 'failed' }) }

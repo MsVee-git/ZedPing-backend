@@ -30,6 +30,12 @@ const aiAgentRoutes = require('./routes/aiAgents')
 const { router: teamRoutes, acceptInvitation, previewInvitation } = require('./routes/team')
 
 app.use('/webhook', webhookRoutes)
+if (process.env.GUPSHUP_WEBHOOK_ENABLED === 'true') {
+ const secret = process.env.GUPSHUP_WEBHOOK_SECRET
+ if (typeof secret !== 'string' || secret.length < 32) throw new Error('Gupshup webhook secret must be configured before activation')
+ app.use('/webhooks/gupshup', require('./routes/gupshupWebhook').createGupshupWebhookRouter({ db: require('./lib/supabase'), webhookSecret: secret }))
+}
+
 app.post('/invitations/preview', previewInvitation)
 app.post('/invitations/accept', requireAuthenticated, acceptInvitation)
 app.use('/messages', requireWorkspace, messageRoutes)
@@ -53,6 +59,13 @@ app.get('/', (req, res) => {
   res.json({ status: 'ZedPing backend is running' })
 })
 
+const stopGupshupWorker = require('./lib/gupshupWorkerLoop').startGupshupWorkerLoop({
+ enabled: process.env.GUPSHUP_WORKER_ENABLED === 'true' && process.env.GUPSHUP_ROUTING_ENABLED === 'true',
+ run: require('./lib/gupshupPipeline').runConfiguredGupshupPipeline,
+ onError: message => console.error(message)
+})
+process.once('SIGTERM', stopGupshupWorker)
+process.once('SIGINT', stopGupshupWorker)
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => {
   console.log(`ZedPing backend running on port ${PORT}`)

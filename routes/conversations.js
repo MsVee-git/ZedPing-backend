@@ -1,4 +1,5 @@
 const { loadOutboundHistory, mergeOutboundHistory } = require('../lib/inboxOutboundHistory')
+const { sendWorkspaceText, sendWorkspaceAttachment } = require('../lib/whatsappRuntime')
 const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
 const express = require('express')
 const multer = require('multer')
@@ -452,7 +453,7 @@ router.post('/:id/reply', async (req, res) => {
     if (!number) return res.status(409).json({ error: 'The WhatsApp connection for this conversation is unavailable' })
     replyTo = await resolveOutgoingReplyContext(req.workspace.customerId, conversation, req.body?.reply_to_message_id)
 
-    const result = await sendTextMessage(number.phone_number_id, contact.phone_number, message, await resolveWhatsAppAccessToken(number, { customerId: req.workspace.customerId }), replyTo?.meta_message_id)
+    const result = await sendWorkspaceText({ number, customerId: req.workspace.customerId, to: contact.phone_number, body: message, replyToMessageId: replyTo?.meta_message_id })
     const now = new Date().toISOString()
     const { error: messageError } = await supabase.from('messages').insert({
       customer_id: req.workspace.customerId,
@@ -539,12 +540,7 @@ router.post('/:id/media', parseConversationUpload, async (req, res) => {
     target = await humanReplyTarget(req)
     const replyTo = await resolveOutgoingReplyContext(req.workspace.customerId, target.conversation, req.body?.reply_to_message_id)
     const attachment = validateOutboundUpload(req.file, String(req.body?.type || '').toLowerCase(), req.body?.caption)
-    const accessToken = await resolveWhatsAppAccessToken(target.number, { customerId: req.workspace.customerId })
-    if (!accessToken) return res.status(409).json({ error: 'The WhatsApp connection for this conversation is unavailable' })
-    const mediaId = await uploadWhatsAppMedia(target.number.phone_number_id, { ...attachment.file, mimetype: attachment.mime_type, originalname: attachment.filename }, accessToken)
-    const metaResult = attachment.type === 'image'
-      ? await sendImageMessage(target.number.phone_number_id, target.contact.phone_number, { id: mediaId, caption: attachment.caption }, accessToken, replyTo?.meta_message_id)
-      : await sendDocumentMessage(target.number.phone_number_id, target.contact.phone_number, { id: mediaId, caption: attachment.caption, filename: attachment.filename }, accessToken, replyTo?.meta_message_id)
+    const { mediaId, result: metaResult } = await sendWorkspaceAttachment({ number: target.number, customerId: req.workspace.customerId, to: target.contact.phone_number, attachment, replyToMessageId: replyTo?.meta_message_id })
     const outboundMedia = { type: attachment.type, media_id: mediaId, mime_type: attachment.mime_type, filename: attachment.filename, caption: attachment.caption }
     const conversation = await recordHumanRichMessage({ workspace: req.workspace, target, messageBody: attachment.caption, media: outboundMedia, metaResult, eventType: 'human_attachment_sent', replyTo })
     return res.json({ conversation, message_status: 'sent' })

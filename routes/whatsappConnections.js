@@ -5,6 +5,10 @@ const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
 const { createMetaEmbeddedSignupClient, MetaSignupError, emitEmbeddedSignupDiagnostic, completionFailureDiagnostic } = require('../lib/metaEmbeddedSignup')
 const { createCredentialVault, CredentialVaultError } = require('../lib/credentialVault')
+const { createGupshupPartnerClient } = require('../lib/gupshupPartner')
+const { createGupshupConnectionStore } = require('../lib/gupshupConnectionStore')
+const { linkVerifiedConnection } = require('../lib/gupshupOnboarding')
+const { gupshupConfigForCustomer } = require('../lib/gupshupConfig')
 
 const SESSION_TTL_MINUTES = 15
 const PHONE_NUMBER_ID_PATTERN = /^[0-9]{5,32}$/
@@ -154,6 +158,7 @@ async function findConflict(customerId, phoneNumberId, wabaId, phoneNumber) {
 router.post('/embedded-signup/prepare', requireAdmin, async (req, res) => {
   if (!req.workspace.emailVerified) return res.status(403).json({ error: 'Verify your email before connecting WhatsApp' })
   try {
+    const gupshupConfig = gupshupConfigForCustomer(req.workspace.customerId)
     const state = crypto.randomBytes(32).toString('base64url')
     const expiresAt = new Date(Date.now() + SESSION_TTL_MINUTES * 60 * 1000).toISOString()
     const { data, error } = await supabase
@@ -162,12 +167,14 @@ router.post('/embedded-signup/prepare', requireAdmin, async (req, res) => {
         customer_id: req.workspace.customerId,
         created_by: req.workspace.userId,
         state_hash: stateHash(state),
+        onboarding_provider: gupshupConfig ? 'gupshup' : 'meta',
         expires_at: expiresAt
       })
       .select('id, expires_at')
       .single()
     if (error) throw error
-    return res.status(201).json({ session_id: data.id, state, expires_at: data.expires_at })
+    return res.status(201).json({ session_id: data.id, state, expires_at: data.expires_at,
+      ...(gupshupConfig ? { provider: 'gupshup', solution_id: gupshupConfig.solutionId } : {}) })
   } catch (_) {
     return res.status(500).json({ error: 'Unable to prepare WhatsApp connection' })
   }
@@ -184,12 +191,17 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
     const { session_id: sessionId, state, code, phone_number_id: phoneNumberId, finish_waba_id: finishWabaId } = req.body
     const { data: session } = await supabase
       .from('whatsapp_connection_sessions')
-      .select('id, customer_id, created_by, state_hash, expires_at, completed_at, whatsapp_number_id, signup_phone_number_id, signup_waba_id')
+      .select('id, customer_id, created_by, state_hash, expires_at, completed_at, whatsapp_number_id, signup_phone_number_id, signup_waba_id, onboarding_provider')
       .eq('id', sessionId)
       .maybeSingle()
 
     if (!session || session.customer_id !== req.workspace.customerId || session.created_by !== req.workspace.userId || !safeEqual(session.state_hash, stateHash(state))) {
       return res.status(403).json({ error: 'This connection session is not authorized' })
+    }
+    const gupshupConfig = session.onboarding_provider === 'gupshup'
+      ? gupshupConfigForCustomer(req.workspace.customerId) : null
+    if (session.onboarding_provider === 'gupshup' && !gupshupConfig) {
+      return res.status(409).json({ error: 'Gupshup onboarding is paused' })
     }
     if (session.completed_at) {
       const connection = await loadCompletedConnection(session, req.workspace.customerId)
@@ -273,6 +285,32 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
       await markSessionCompleted(session, req.workspace.customerId, connection.id)
       return res.json({ connection: provisioningView(connection), idempotent: true })
     }
+
+    if (gupshupConfig) {
+      completionStage = 'gupshup_app_link'
+      const store = createGupshupConnectionStore(supabase)
+      const existingMapping = await store.load({ customerId: req.workspace.customerId, connectionId: connection.id })
+      if (conflict.record && !existingMapping) {
+        return res.status(409).json({ error: 'An existing connection requires the guided Gupshup migration process' })
+      }
+      const mapping = await store.ensure({ customerId: req.workspace.customerId, connectionId: connection.id, walletId: gupshupConfig.walletId })
+      const result = await linkVerifiedConnection({
+        customerId: req.workspace.customerId,
+        connection: { ...connection, provider: 'gupshup',
+          phone_number: validated.displayPhoneNumber.replace(/[^0-9]/g, ''),
+          gupshup_app_id: mapping.app_id },
+        walletId: gupshupConfig.walletId, callbackUrl: gupshupConfig.callbackUrl,
+        store, partner: createGupshupPartnerClient(gupshupConfig)
+      })
+      // Linking does not prove message delivery or webhook readiness.
+      // Keep the session pending; never run Meta registration or mark connected.
+      return res.status(202).json({ provider: 'gupshup', provisioning_state:
+        mapping.link_state === 'confirmation_required' ? 'registration_confirmation_required' : 'in_progress',
+        linked: result.kind === 'linked' })
+    }
+
+    const existingGupshupMapping = await createGupshupConnectionStore(supabase).load({ customerId: req.workspace.customerId, connectionId: connection.id })
+    if (existingGupshupMapping) return res.status(409).json({ error: 'This connection uses Gupshup provisioning' })
 
     // Claim a pending/failed connection before any Meta mutation. Concurrent
     // duplicate completion requests can observe the claim, but cannot register
@@ -368,6 +406,8 @@ router.post('/:id/provision/retry', requireAdmin, async (req, res) => {
       .eq('id', req.params.id).eq('customer_id', req.workspace.customerId).maybeSingle()
     if (error) throw error
     if (!connection) return res.status(404).json({ error: 'WhatsApp connection not found' })
+    const gupshupMapping = await createGupshupConnectionStore(supabase).load({ customerId: req.workspace.customerId, connectionId: connection.id })
+    if (gupshupMapping) return res.status(409).json({ error: 'Use the Gupshup onboarding session to check this connection; Meta registration retries are disabled' })
     const action = recoveryAction(connection)
     if (action === 'operational') return res.json({ connection: provisioningView(connection), idempotent: true })
     if (action === 'confirmation_required') {

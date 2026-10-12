@@ -1,3 +1,4 @@
+const { sendWorkspaceText } = require('../lib/whatsappRuntime')
 const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
 const express = require('express')
 const crypto = require('crypto')
@@ -204,6 +205,12 @@ async function processMessage(ctx) {
     return
   }
 
+  return runInboundAutomation(ctx)
+}
+
+async function runInboundAutomation(ctx) {
+  const conversation = ctx.conversation
+  if (isMarketingOptOutCommand(ctx.body)) return
   // This server-side guard is intentionally before AI, flow and keyword execution.
   // Needs-attention and human conversations keep receiving/persisting inbound
   // messages but cannot produce an automated response.
@@ -219,7 +226,7 @@ async function processMessage(ctx) {
 }
 
 async function outgoing(ctx, body) {
-  const result = await sendTextMessage(ctx.number.phone_number_id, ctx.from, body, await resolveWhatsAppAccessToken(ctx.number, { customerId: ctx.customerId }))
+  const result = await sendWorkspaceText({ number: ctx.number, customerId: ctx.customerId, to: ctx.from, body })
   const now = new Date().toISOString()
   const { data: message, error } = await supabase.from('messages').insert({
     customer_id: ctx.customerId,
@@ -542,3 +549,5 @@ async function checkAISession(ctx) {
 module.exports = router
 
 
+
+module.exports.runInboundAutomation = runInboundAutomation

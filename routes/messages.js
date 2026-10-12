@@ -1,3 +1,4 @@
+const { sendWorkspaceText } = require('../lib/whatsappRuntime')
 const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
 const express = require('express')
 const router = express.Router()
@@ -10,7 +11,7 @@ router.post('/send', async (req, res) => {
   const { data: number } = await supabase.from('whatsapp_numbers').select('*').eq('id', phoneNumberId).eq('customer_id', req.workspace.customerId).eq('status', 'connected').maybeSingle()
   if (!number) return res.status(404).json({ error: 'Connected WhatsApp number not found' })
   try {
-    const result = await sendTextMessage(number.phone_number_id, to, message, await resolveWhatsAppAccessToken(number, { customerId: req.workspace.customerId }))
+    const result = await sendWorkspaceText({ number, customerId: req.workspace.customerId, to, body: message })
     await supabase.from('messages').insert({ customer_id:req.workspace.customerId, whatsapp_number_id:number.id, direction:'outbound', to_number:to, message_body:message, status:'sent' })
     res.json({ success:true, result })
   } catch (error) { res.status(500).json({ success:false, error:error.message }) }
