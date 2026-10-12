@@ -1,3 +1,4 @@
+const { loadOutboundHistory, mergeOutboundHistory } = require('../lib/inboxOutboundHistory')
 const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
 const express = require('express')
 const multer = require('multer')
@@ -219,7 +220,9 @@ router.get('/:id', async (req, res) => {
       if (replyError) throw replyError
       repliesById = new Map((replies || []).map(reply => [reply.id, reply]))
     }
-    const publicMessages = (messages || []).map(({ inbound_media, outbound_media, reply_to_message_id, ...message }) => {
+    stage = 'outbound_contact_history'
+    const outboundHistory = await loadOutboundHistory(supabase, req.workspace.customerId, conversation)
+    const publicMessages = mergeOutboundHistory(messages, outboundHistory).map(({ inbound_media, outbound_media, reply_to_message_id, ...message }) => {
       let publicInbound, publicOutbound
       try {
         publicInbound = publicInboundMedia(inbound_media)
