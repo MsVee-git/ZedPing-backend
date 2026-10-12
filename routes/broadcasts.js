@@ -1,9 +1,21 @@
+const multer = require('multer')
+const { validateTemplateHeaderMedia } = require('../lib/templateMedia')
+const mediaUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } })
+function parseBroadcastUpload(req, res, next) {
+ mediaUpload.single('header_media')(req, res, error => {
+  if (error) return res.status(400).json({ error: 'Select one header file up to 10 MB.' })
+  if (typeof req.body?.variable_mappings === 'string') {
+   try { req.body.variable_mappings = JSON.parse(req.body.variable_mappings) } catch { return res.status(400).json({ error: 'Invalid template variable mappings.' }) }
+  }
+  next()
+ })
+}
 const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
 const express = require('express')
 const router = express.Router()
 const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
-const { sendTextMessage, sendTemplateMessage } = require('../lib/whatsapp')
+const { sendTextMessage, sendTemplateMessage, uploadWhatsAppMedia } = require('../lib/whatsapp')
 const { transientRecipient, dedupeRecipients } = require('../lib/broadcastRecipients')
 const { loadWorkspaceTemplates } = require('../lib/workspaceTemplates')
 const { describeTemplate, resolveTemplateRecipients, renderedTemplatePreview } = require('../lib/broadcastTemplates')
@@ -121,20 +133,26 @@ router.post('/review-template', requireAdmin, async (req, res) => {
   } catch (error) { fail(res, error) }
 })
 
-router.post('/send-template', requireAdmin, async (req, res) => {
+router.post('/send-template', requireAdmin, parseBroadcastUpload, async (req, res) => {
   try {
     // The review is repeated at this boundary. Browser state is never a grant.
     const review = await templateReview(req.workspace.customerId, req.body || {})
     if (review.error) return res.status(review.status || 400).json({ error: review.error })
     if (!review.eligible_recipients) return res.status(400).json({ error: 'No recipients can receive this template.' })
     if (review.skipped_recipients) return res.status(400).json({ error: 'Resolve all required template values before sending.' })
+    const mediaType = review.template.header_media_type
+    if (mediaType && !['image', 'document', 'text'].includes(mediaType)) return res.status(400).json({ error: 'This header format is not supported yet.' })
+    const needsMedia = ['image', 'document'].includes(mediaType)
+    if (needsMedia) req.file = validateTemplateHeaderMedia(req.file, mediaType)
+    if (!needsMedia && req.file) return res.status(400).json({ error: 'This template does not use header media.' })
     const accessToken = await resolveWhatsAppAccessToken(review.number, { customerId: req.workspace.customerId })
+    const mediaId = needsMedia ? await uploadWhatsAppMedia(review.number.phone_number_id, req.file, accessToken) : null
     const { data: activity, error: activityError } = await supabase.from('scheduled_broadcasts').insert({ customer_id: req.workspace.customerId, broadcast_name: String(req.body?.broadcast_name || review.template.name).trim().slice(0, 160) || review.template.name, contacts: review.recipients.map(({ id, name, phone_number }) => ({ id, name, phone_number })), message: '[Template] ' + review.template.name + ' (' + review.template.language + ')', phone_number_id: review.number.phone_number_id, scheduled_at: new Date().toISOString(), status: 'sending' }).select().single()
     if (activityError) throw activityError
     const results = []
     for (const recipient of review.recipients) {
       try {
-        const metaResult = await sendTemplateMessage(review.number.phone_number_id, recipient.phone_number, { name: review.template.name, language: review.template.language, components: recipient.template_components }, accessToken)
+        const metaResult = await sendTemplateMessage(review.number.phone_number_id, recipient.phone_number, { name: review.template.name, language: review.template.language, components: recipient.template_components, ...(mediaId ? { headerMedia: { type: mediaType, id: mediaId } } : {}) }, accessToken)
         await supabase.from('messages').insert({ customer_id: req.workspace.customerId, whatsapp_number_id: review.number.id, direction: 'outbound', to_number: recipient.phone_number, message_body: renderedTemplatePreview(review.template, recipient.template_components), status: 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null, contact_id: recipient.id || null })
         results.push({ status: 'sent' })
       } catch (_) { results.push({ status: 'failed' }) }

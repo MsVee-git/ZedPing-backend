@@ -185,7 +185,7 @@ router.post('/send', requireAdmin, parseTemplateUpload, async (req, res) => {
     if (mediaType && !req.file) return res.status(400).json({ error: 'Select the required ' + mediaType + ' header media before sending' })
     if (!mediaType && req.file) return res.status(400).json({ error: 'This template does not use media header content' })
     const accessToken = await resolveWhatsAppAccessToken(result.number, { customerId: req.workspace.customerId })
-    const mediaId = mediaType ? await uploadWhatsAppMedia(result.number.phone_number_id, validHeaderMedia(req.file, mediaType), accessToken) : null
+    const mediaId = mediaType ? await uploadWhatsAppMedia(result.number.phone_number_id, validateTemplateHeaderMedia(req.file, mediaType), accessToken) : null
     const metaResult = await sendTemplateMessage(
       result.number.phone_number_id,
       recipient,

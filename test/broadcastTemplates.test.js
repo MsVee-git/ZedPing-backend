@@ -7,7 +7,7 @@ const template = { id: 'template-1', name: 'lead_followup', status: 'APPROVED', 
 const contacts = [{ id: 'contact-1', name: 'Ada', phone_number: '+260971234567', email: 'ada@example.test' }]
 
 test('approved Meta templates expose body variables and an owner-safe preview', () => {
-  assert.deepEqual(describeTemplate(template), { id: 'template-1', name: 'lead_followup', status: 'APPROVED', category: 'MARKETING', language: 'en_US', body_preview: 'Hello {{1}}, call us on {{2}}.', variables: [1, 2], sendable: true, unavailable_reason: null })
+  assert.deepEqual(describeTemplate(template), { id: 'template-1', name: 'lead_followup', status: 'APPROVED', category: 'MARKETING', language: 'en_US', body_preview: 'Hello {{1}}, call us on {{2}}.', variables: [1, 2], header_media_type: null, sendable: true, unavailable_reason: null })
   assert.equal(describeTemplate({ ...template, status: 'PENDING' }).sendable, false)
 })
 
@@ -37,3 +37,7 @@ test('persisted campaign preview identifies the explicit template offer a custom
   assert.equal(renderedTemplatePreview(review.template, review.recipients[0].template_components), 'Hello Ada, call us on +260000000000.')
 })
 
+
+test('image templates expose the required header type to the composer', () => {
+ assert.equal(describeTemplate({...template, components:[{type:'HEADER',format:'IMAGE'},...template.components]}).header_media_type,'image')
+})

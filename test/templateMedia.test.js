@@ -1,7 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const { validateTemplateHeaderMedia } = require('../lib/templateMedia')
-const { MetaTemplateError } = require('./metaTemplates')
+const { MetaTemplateError } = require('../lib/metaTemplates')
 
 const file = (bytes, mimetype = 'application/octet-stream') => ({
   buffer: Buffer.from(bytes),
