@@ -119,3 +119,12 @@ test('upload uses multipart app authorization without setting a broken content-t
  else await assert.rejects(client.getAppToken('app1'),/app_token/);
  }
  });
+
+test('Universal Token bypasses disabled legacy login and token retrieval', async () => {
+ const calls=[]; const client=createGupshupPartnerClient({universalToken:'private-universal',fetchImpl:async (url,options)=>{calls.push({url,options});return ok({status:'success',whatsapp:{creationStage:'ERROR'}})}});
+ await client.getAppStatus('app1');
+ assert.equal(calls.length,1);
+ assert.ok(calls[0].url.endsWith('/pipeline'));
+ assert.equal(calls[0].options.headers.Authorization,'Bearer private-universal');
+ assert.equal(await client.getPartnerToken(),'private-universal');
+});
