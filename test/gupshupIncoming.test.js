@@ -38,3 +38,10 @@ test('image, document and location metadata are normalized without accepting arb
  const bad = callback(); bad.entry[0].changes[0].value.messages[0] = { id: 'bad', from: '260977123456', type: 'image', image: { link: 'http://private-host' } }
  assert.throws(() => normalizeGupshupIncoming(bad,mapping,number), /media metadata/)
 })
+
+test('pre-Meta failure callbacks retain Gupshup ID and numeric error codes', () => {
+ const p=callback();const v=p.entry[0].changes[0].value;delete v.messages;v.statuses=[{id:'',gs_id:'gs1',status:'failed',code:'1001'}];
+ const events=normalizeGupshupIncoming(p,mapping,number);
+ assert.equal(events[0].payload.message_id,'gs1');assert.deepEqual(events[0].payload.error_codes,['1001']);
+ v.statuses[0].gs_id='';assert.throws(()=>normalizeGupshupIncoming(p,mapping,number),/delivery event/);
+});

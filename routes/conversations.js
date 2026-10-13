@@ -454,6 +454,7 @@ router.post('/:id/reply', async (req, res) => {
     replyTo = await resolveOutgoingReplyContext(req.workspace.customerId, conversation, req.body?.reply_to_message_id)
 
     const result = await sendWorkspaceText({ number, customerId: req.workspace.customerId, to: contact.phone_number, body: message, replyToMessageId: replyTo?.meta_message_id })
+    const messageStatus = result.provider === 'gupshup' ? 'accepted' : 'sent'
     const now = new Date().toISOString()
     const { error: messageError } = await supabase.from('messages').insert({
       customer_id: req.workspace.customerId,
@@ -463,7 +464,7 @@ router.post('/:id/reply', async (req, res) => {
       direction: 'outbound',
       to_number: contact.phone_number,
       message_body: message,
-      status: 'sent',
+      status: messageStatus,
       meta_message_id: result?.messages?.[0]?.id || null,
       reply_to_message_id: replyTo?.id || null
     })
@@ -475,7 +476,7 @@ router.post('/:id/reply', async (req, res) => {
     }).eq('id', conversation.id).eq('customer_id', req.workspace.customerId).select(CONVERSATION_FIELDS).single()
     if (error) throw error
     await recordConversationEvent({ customerId: req.workspace.customerId, conversationId: conversation.id, actorUserId: req.workspace.userId, eventType: 'human_reply_sent' })
-    return res.json({ conversation: data, message_status: 'sent' })
+    return res.json({ conversation: data, message_status: messageStatus })
   } catch (error) {
     if (conversation && message) {
       const now = new Date().toISOString()
@@ -524,7 +525,7 @@ async function recordHumanRichMessage({ workspace, target, messageBody, media, m
   const { error: messageError } = await supabase.from('messages').insert({
     customer_id: workspace.customerId, whatsapp_number_id: target.number.id, contact_id: target.contact.id,
     conversation_id: target.conversation.id, direction: 'outbound', to_number: target.contact.phone_number,
-    message_body: messageBody || null, outbound_media: media, status: 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null, reply_to_message_id: replyTo?.id || null
+    message_body: messageBody || null, outbound_media: media, status: metaResult?.provider === 'gupshup' ? 'accepted' : 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null, reply_to_message_id: replyTo?.id || null
   })
   if (messageError) throw messageError
   const { data: conversation, error } = await supabase.from('conversations').update({ last_message_at: now, last_outbound_at: now, updated_at: now })
@@ -543,7 +544,7 @@ router.post('/:id/media', parseConversationUpload, async (req, res) => {
     const { mediaId, result: metaResult } = await sendWorkspaceAttachment({ number: target.number, customerId: req.workspace.customerId, to: target.contact.phone_number, attachment, replyToMessageId: replyTo?.meta_message_id })
     const outboundMedia = { type: attachment.type, media_id: mediaId, mime_type: attachment.mime_type, filename: attachment.filename, caption: attachment.caption }
     const conversation = await recordHumanRichMessage({ workspace: req.workspace, target, messageBody: attachment.caption, media: outboundMedia, metaResult, eventType: 'human_attachment_sent', replyTo })
-    return res.json({ conversation, message_status: 'sent' })
+    return res.json({ conversation, message_status: metaResult?.provider === 'gupshup' ? 'accepted' : 'sent' })
   } catch (error) {
     return res.status(error.status || 502).json({ error: error.status ? error.message : 'Unable to send this attachment' })
   }
