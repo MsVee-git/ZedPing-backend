@@ -111,3 +111,11 @@ test('upload uses multipart app authorization without setting a broken content-t
  assert.equal(upload.body.get('file_type'),'image/png')
  await assert.rejects(client.uploadMedia('app1',{buffer:Buffer.from('x'),mimetype:'text/html'}),/upload_validation/)
 })
+
+ test('documented nested app token is accepted but inactive token rejected', async () => {
+ for (const active of [true, false]) {
+ const client = createGupshupPartnerClient({email:'e', secret:'s',fetchImpl:async url => ok(url.endsWith('/login') ? {token:'partner'} : {token:{token:'app-token',active}})});
+ if(active) assert.equal(await client.getAppToken('app1'),'app-token');
+ else await assert.rejects(client.getAppToken('app1'),/app_token/);
+ }
+ });
