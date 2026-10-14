@@ -35,3 +35,8 @@ test('receipt categories partition outbound records; read is included in deliver
  assert.equal(m.unconfirmed,1);assert.equal(m.accepted_pending,1);assert.equal(m.submission_failures,1);assert.equal(m.sent_pending,1);assert.equal(m.delivered,1);assert.equal(m.read,1);assert.equal(m.failed,1)
  assert.equal(m.failure_reasons['131026: Undeliverable'],1)
 })
+
+test('Gupshup receipts without provider timestamps use clearly labelled receipt time',()=>{
+ const r=receiptRows([{id:'m',status:'failed',code:'9999'}],number,'gupshup')[0]
+ assert.equal(r.timestamp_basis,'received');assert.equal(r.errors[0].code,'9999')
+})
