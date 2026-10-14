@@ -10,6 +10,8 @@ function database(seed, { fail = null, countMissing = false, cappedPage = null }
     const q = {
       select(c,o) { columns=c; options=o; return q },
       eq(k,v) { filters.push([k,'eq',v]); return q },
+      gte(k,v) { filters.push([k,'gte',v]); return q },
+      lt(k,v) { filters.push([k,'lt',v]); return q },
       lte(k,v) { filters.push([k,'lte',v]); return q },
       gt(k,v) { filters.push([k,'gt',v]); return q },
       order(k,o) { order=[k,o]; return q },
@@ -17,7 +19,7 @@ function database(seed, { fail = null, countMissing = false, cappedPage = null }
       then(resolve,reject) {
         calls.push({table,columns,filters:[...filters],order})
         if (table===fail) return Promise.resolve({error:new Error('query failed')}).then(resolve,reject)
-        let rows=(seed[table]||[]).filter(r=>filters.every(([k,op,v])=>op==='eq'?r[k]===v:op==='gt'?r[k]>v:r[k]<=v))
+        let rows=(seed[table]||[]).filter(r=>filters.every(([k,op,v])=>op==='eq'?r[k]===v:op==='gt'?r[k]>v:op==='gte'?r[k]>=v:op==='lt'?r[k]<v:r[k]<=v))
         if(options?.head) return Promise.resolve({count:countMissing?null:rows.length,error:null}).then(resolve,reject)
         rows=rows.sort((a,b)=>String(a.id).localeCompare(String(b.id))).slice(0,cappedPage??limit)
         return Promise.resolve({data:rows,error:null}).then(resolve,reject)
@@ -61,4 +63,15 @@ test('a workspace is required',async()=>{await assert.rejects(loadLifetimeReport
 test('continues even when the database caps each page below the requested size',async()=>{
  const db=database({messages:[row('1',{direction:'inbound'}),row('2',{direction:'outbound',status:'sent'}),row('3',{direction:'inbound'})]},{cappedPage:1})
  const r=await loadLifetimeReport(db,'a',{now:cutoff,pageSize:2});assert.equal(r.messages.total,3)
+})
+
+test('period includes start, excludes end, retains current counts and workspace isolation',async()=>{
+ const start='2026-09-01T00:00:00Z',end='2026-10-01T00:00:00Z'
+ const messages=[row('1',{created_at:'2026-08-31T23:59:59Z'}),row('2',{created_at:start}),row('3',{created_at:'2026-09-30T23:59:59Z'}),row('4',{created_at:end}),row('5',{created_at:start,customer_id:'b'})]
+ const r=await loadLifetimeReport(database({messages,scheduled_broadcasts:messages,contacts:[row('1')]}),'a',{now:cutoff,start,end,pageSize:1})
+ assert.equal(r.scope,'period');assert.equal(r.messages.total,2);assert.equal(r.broadcasts.total,2);assert.equal(r.current.contacts,1)
+ assert.equal(r.period.start_inclusive,'2026-09-01T00:00:00.000Z')
+})
+test('invalid or incomplete periods reject',async()=>{
+ for(const options of [{start:'bad',end:'bad'},{start:'2026-10-01',end:'2026-09-01'},{start:'2026-09-01'}]) await assert.rejects(loadLifetimeReport(database({}),'a',{now:cutoff,...options}),/valid start/)
 })
