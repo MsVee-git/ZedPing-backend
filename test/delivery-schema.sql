@@ -7,3 +7,4 @@ grant usage on schema public to service_role,authenticated;
 grant all on public.customers,public.whatsapp_numbers,public.scheduled_broadcasts,public.messages to service_role;
 grant select,insert,update on public.messages to authenticated;
 grant select on public.scheduled_broadcasts to authenticated;
+create table public.gupshup_webhook_events(customer_id uuid,whatsapp_number_id uuid,event_type text,payload jsonb,created_at timestamptz);
