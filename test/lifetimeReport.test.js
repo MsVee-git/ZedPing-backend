@@ -52,7 +52,7 @@ test('counts every page, excludes other workspaces and future records, preserves
 test('empty history returns actual zero counts and unavailable time boundaries',async()=>{
  const r=await loadLifetimeReport(database({}),'a',{now:cutoff,pageSize:2})
  assert.equal(r.messages.total,0);assert.equal(r.broadcasts.total,0);assert.equal(r.messages.first_recorded_at,null)
- assert.ok(r.unavailable.includes('Verified delivery/read rates'))
+ assert.ok(r.unavailable.includes('Complete historical delivery/read rates'))
 })
 test('a failed later source rejects the complete report rather than publishing partial totals',async()=>{
  await assert.rejects(loadLifetimeReport(database({},{fail:'scheduled_broadcasts'}),'a',{now:cutoff}),/query failed/)
@@ -74,4 +74,16 @@ test('period includes start, excludes end, retains current counts and workspace 
 })
 test('invalid or incomplete periods reject',async()=>{
  for(const options of [{start:'bad',end:'bad'},{start:'2026-10-01',end:'2026-09-01'},{start:'2026-09-01'}]) await assert.rejects(loadLifetimeReport(database({}),'a',{now:cutoff,...options}),/valid start/)
+})
+
+test('delivery evidence distinguishes old sent values and linked campaign receipts',async()=>{
+ const db=database({messages:[
+ row('1',{direction:'outbound',status:'sent'}),
+ row('2',{direction:'outbound',status:'read',broadcast_id:'c',delivery_receipts:{read_at:'2026-10-14T11:00:00Z'}}),
+ row('3',{direction:'outbound',status:'failed',broadcast_id:'c',delivery_receipts:{failed_at:'2026-10-14T11:01:00Z',errors:[{code:'131026',title:'Undeliverable'}]}})
+ ],scheduled_broadcasts:[row('c'),row('old')]})
+ const r=await loadLifetimeReport(db,'a',{now:cutoff})
+ assert.equal(r.delivery.unconfirmed,1);assert.equal(r.delivery.delivered,1);assert.equal(r.delivery.read,1);assert.equal(r.delivery.failed,1)
+ assert.equal(r.broadcasts.campaigns.find(c=>c.id==='c').delivery.linked_messages,2)
+ assert.equal(r.broadcasts.campaigns.find(c=>c.id==='old').delivery,null)
 })
