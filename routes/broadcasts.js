@@ -153,9 +153,12 @@ router.post('/send-template', requireAdmin, parseBroadcastUpload, async (req, re
     for (const recipient of review.recipients) {
       try {
         const metaResult = await sendWorkspaceTemplate({number:review.number,customerId:req.workspace.customerId,to:recipient.phone_number,category:review.template.category,template:{ name: review.template.name, language: review.template.language, components: recipient.template_components, ...(mediaId ? { headerMedia: { type: mediaType, id: mediaId } } : {}) }})
-        await supabase.from('messages').insert({ customer_id: req.workspace.customerId, whatsapp_number_id: review.number.id, direction: 'outbound', to_number: recipient.phone_number, message_body: renderedTemplatePreview(review.template, recipient.template_components), status: 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null, contact_id: recipient.id || null })
+        await supabase.from('messages').insert({ customer_id: req.workspace.customerId, whatsapp_number_id: review.number.id, direction: 'outbound', to_number: recipient.phone_number, message_body: renderedTemplatePreview(review.template, recipient.template_components), status: 'accepted', broadcast_id: activity.id, meta_message_id: metaResult?.messages?.[0]?.id || null, contact_id: recipient.id || null })
         results.push({ status: 'sent' })
-      } catch (_) { results.push({ status: 'failed' }) }
+      } catch (_) {
+        await supabase.from('messages').insert({customer_id:req.workspace.customerId,whatsapp_number_id:review.number.id,direction:'outbound',broadcast_id:activity.id,to_number:recipient.phone_number,status:'failed'})
+        results.push({ status: 'failed' })
+      }
     }
     const accepted = results.filter((item) => item.status === 'sent').length
     const failed = results.length - accepted
@@ -181,9 +184,12 @@ router.post('/send', requireAdmin, async (req, res) => {
     for (const contact of marketing.eligible) {
       try {
         const metaResult = await sendWorkspaceText({number,customerId:req.workspace.customerId,to:contact.phone_number,body})
-        await supabase.from('messages').insert({ customer_id: req.workspace.customerId, whatsapp_number_id: number.id, direction: 'outbound', to_number: contact.phone_number, message_body: body, status: 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null, contact_id: contact.id || null })
+        await supabase.from('messages').insert({ customer_id: req.workspace.customerId, whatsapp_number_id: number.id, direction: 'outbound', to_number: contact.phone_number, message_body: body, status: 'accepted', broadcast_id: activity.id, meta_message_id: metaResult?.messages?.[0]?.id || null, contact_id: contact.id || null })
         results.push({ status: 'sent' })
-      } catch (_) { results.push({ status: 'failed' }) }
+      } catch (_) {
+        await supabase.from('messages').insert({customer_id:req.workspace.customerId,whatsapp_number_id:number.id,direction:'outbound',broadcast_id:activity.id,to_number:contact.phone_number,status:'failed'})
+        results.push({ status: 'failed' })
+      }
     }
     const accepted = results.filter((item) => item.status === 'sent').length
     const failed = results.length - accepted
