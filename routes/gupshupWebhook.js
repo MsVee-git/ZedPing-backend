@@ -1,3 +1,4 @@
+const { persistDeliveryStatuses } = require('../lib/deliveryReceipts')
 const express = require('express')
 const { authenticateGupshupWebhook } = require('../lib/gupshupWebhook')
 const { normalizeGupshupIncoming, persistGupshupEvents } = require('../lib/gupshupIncoming')
@@ -33,6 +34,10 @@ function createGupshupWebhookRouter({ db, webhookSecret }) {
           }))
         }))
         return res.sendStatus(422)
+      }
+      for (const entry of req.body.entry || []) for (const change of entry.changes || []) {
+        const statuses = (change.value?.statuses || []).filter(s=>s.type!=='set-callback');
+        await persistDeliveryStatuses(db,statuses,result.data,'gupshup');
       }
       await persistGupshupEvents(db, mapping, events)
       return res.status(200).end()
