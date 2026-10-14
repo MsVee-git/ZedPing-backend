@@ -36,7 +36,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm ci
       - run: node --test test/deliveryReceipts.test.js test/lifetimeReport.test.js
       - run: node --check routes/webhook.js && node --check routes/gupshupWebhook.js && node --check routes/messages.js && node --check routes/conversations.js && node --check routes/broadcasts.js
       - run: psql -v ON_ERROR_STOP=1 -f test/delivery-schema.sql -f docs/sql/message_delivery_receipts.sql -f test/delivery-receipts.sql
