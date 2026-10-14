@@ -1,3 +1,4 @@
+const { initialDelivery, addDelivery } = require('../lib/deliveryMetrics')
 const { sendWorkspaceText, sendWorkspaceTemplate, uploadWorkspaceMedia } = require('../lib/whatsappRuntime')
 const multer = require('multer')
 const { validateTemplateHeaderMedia } = require('../lib/templateMedia')
@@ -213,7 +214,28 @@ router.get('/scheduled/:id', async (req, res) => {
     if (error) throw error
     if (!data) return res.status(404).json({ error: 'Broadcast not found.' })
     const { contacts, ...broadcast } = data
-    res.json({ ...broadcast, recorded_recipients: Array.isArray(contacts) ? contacts.length : null })
+    let delivery = null;
+    // Explicit campaign links only; no historical audience or text matching.
+    let cursor = null, total = 0;
+    while(true) {
+      let query = supabase.from('messages').select('id,direction,status,delivery_receipts')
+        .eq('customer_id',req.workspace.customerId).eq('broadcast_id',data.id).eq('direction','outbound')
+        .order('id',{ascending:true}).limit(500);
+      if(cursor)query=query.gt('id',cursor);
+      const page=await query;
+      if(page.error)throw page.error;
+      const rows=page.data||[];
+      if(!rows.length)break;
+      total+=rows.length;
+      if(total>250000)throw new Error('Campaign report too large');
+      if(!delivery)delivery={...initialDelivery(),linked_messages:0};
+      for(const row of rows){delivery.linked_messages++;addDelivery(delivery,row);}
+      const next=rows[rows.length-1].id;
+      if(!next||next===cursor)throw new Error('Campaign pagination did not advance');
+      cursor=next;
+    }
+    res.set('Cache-Control','no-store');
+    res.json({ ...broadcast, delivery, recorded_recipients: Array.isArray(contacts) ? contacts.length : null })
   } catch (_) { res.status(500).json({ error: 'Could not load broadcast details.' }) }
 })
 
