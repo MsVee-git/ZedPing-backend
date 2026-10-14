@@ -72,3 +72,16 @@ end $$;
 revoke all on function public.attach_message_delivery_event() from public,anon,authenticated;
 grant execute on function public.attach_message_delivery_event() to service_role;
 create trigger attach_message_delivery_event after insert on public.message_delivery_events for each row execute function public.attach_message_delivery_event();
+
+-- Recover only retained provider callbacks. Missing provider time uses the recorded arrival time.
+insert into public.message_delivery_events(customer_id,whatsapp_number_id,provider,message_id,alternate_message_id,status,occurred_at,timestamp_basis,errors)
+select e.customer_id,e.whatsapp_number_id,'gupshup',e.payload->>'message_id',e.payload->>'gupshup_message_id',
+ e.payload->>'status',
+ case when e.payload->>'timestamp' ~ '^[0-9]{1,10}$' then to_timestamp((e.payload->>'timestamp')::double precision) else e.created_at end,
+ case when e.payload->>'timestamp' ~ '^[0-9]{1,10}$' then 'provider' else 'received' end,
+ coalesce((select jsonb_agg(jsonb_build_object('code',code,'title','Provider did not retain a failure description')) from jsonb_array_elements_text(coalesce(e.payload->'error_codes','[]'::jsonb)) code where code ~ '^[0-9]{1,12}$'),'[]'::jsonb)
+from public.gupshup_webhook_events e
+where e.event_type='status' and e.payload->>'status' in ('sent','delivered','read','failed')
+ and length(e.payload->>'message_id') between 1 and 255
+ and exists(select 1 from public.whatsapp_numbers n where n.id=e.whatsapp_number_id and n.customer_id=e.customer_id)
+on conflict do nothing;
