@@ -1,0 +1,41 @@
+name: Message delivery receipt tests
+on:
+  pull_request:
+    paths:
+      - 'lib/delivery*.js'
+      - 'lib/lifetimeReport.js'
+      - 'routes/webhook.js'
+      - 'routes/gupshupWebhook.js'
+      - 'routes/messages.js'
+      - 'routes/conversations.js'
+      - 'routes/broadcasts.js'
+      - 'test/*'
+      - 'docs/sql/message_delivery_receipts.sql'
+      - '.github/workflows/message-delivery.yml'
+permissions:
+  contents: read
+jobs:
+  receipt-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: test
+      PGDATABASE: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node --test test/deliveryReceipts.test.js test/lifetimeReport.test.js
+      - run: node --check routes/webhook.js && node --check routes/gupshupWebhook.js && node --check routes/messages.js && node --check routes/conversations.js && node --check routes/broadcasts.js
+      - run: psql -v ON_ERROR_STOP=1 -f test/delivery-schema.sql -f docs/sql/message_delivery_receipts.sql -f test/delivery-receipts.sql

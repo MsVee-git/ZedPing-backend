@@ -12,7 +12,7 @@ router.post('/send', async (req, res) => {
   if (!number) return res.status(404).json({ error: 'Connected WhatsApp number not found' })
   try {
     const result = await sendWorkspaceText({ number, customerId: req.workspace.customerId, to, body: message })
-    await supabase.from('messages').insert({ customer_id:req.workspace.customerId, whatsapp_number_id:number.id, direction:'outbound', to_number:to, message_body:message, status:'sent' })
+    await supabase.from('messages').insert({ customer_id:req.workspace.customerId, whatsapp_number_id:number.id, direction:'outbound', to_number:to, message_body:message, status:'accepted', meta_message_id:result?.messages?.[0]?.id || null })
     res.json({ success:true, result })
   } catch (error) { res.status(500).json({ success:false, error:error.message }) }
 })

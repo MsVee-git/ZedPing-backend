@@ -1,5 +1,6 @@
 const { sendWorkspaceText } = require('../lib/whatsappRuntime')
 const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
+const { persistMetaDeliveryPayload } = require('../lib/deliveryReceipts')
 const express = require('express')
 const crypto = require('crypto')
 const router = express.Router()
@@ -41,6 +42,7 @@ function validSignature(req) {
 
 router.post('/', async (req, res) => {
   if (!validSignature(req)) return res.sendStatus(401)
+  try { await persistMetaDeliveryPayload(supabase, req.body) } catch { return res.sendStatus(503) }
   res.sendStatus(200)
   try {
     for (const entry of req.body.entry || []) for (const change of entry.changes || []) {
@@ -236,7 +238,7 @@ async function outgoing(ctx, body) {
     direction: 'outbound',
     to_number: ctx.from,
     message_body: body,
-    status: 'sent',
+    status: 'accepted',
     meta_message_id: result?.messages?.[0]?.id || null
   }).select().single()
   if (error) throw error
