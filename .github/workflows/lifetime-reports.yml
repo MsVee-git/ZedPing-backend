@@ -1,0 +1,21 @@
+name: Lifetime report tests
+on:
+  pull_request:
+    paths:
+      - 'lib/lifetimeReport.js'
+      - 'routes/reports.js'
+      - 'test/lifetimeReport.test.js'
+      - 'index.js'
+      - '.github/workflows/lifetime-reports.yml'
+permissions:
+  contents: read
+jobs:
+  report-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node --test test/lifetimeReport.test.js
+      - run: node --check routes/reports.js && node --check index.js
