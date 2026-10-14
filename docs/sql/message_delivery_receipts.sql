@@ -8,9 +8,10 @@ create table public.message_delivery_events (
  alternate_message_id text,
  status text not null check(status in ('sent','delivered','read','failed')),
  occurred_at timestamptz not null,
+ timestamp_basis text not null default 'provider' check(timestamp_basis in ('provider','received')),
  errors jsonb not null default '[]'::jsonb check(jsonb_typeof(errors)='array'),
  created_at timestamptz not null default now(),
- unique(customer_id,whatsapp_number_id,provider,message_id,status,occurred_at)
+ unique(customer_id,whatsapp_number_id,provider,message_id,status)
 );
 alter table public.message_delivery_events enable row level security;
 revoke all on public.message_delivery_events from public,anon,authenticated;
@@ -46,6 +47,9 @@ begin
  elsif evidence ? 'delivered_at' then target_status:='delivered';
  elsif evidence ? 'failed_at' then target_status:='failed';
  else target_status:='sent'; end if;
+ select jsonb_object_agg(status,timestamp_basis) into reason from public.message_delivery_events
+  where customer_id=new.customer_id and whatsapp_number_id=new.whatsapp_number_id and (message_id=new.meta_message_id or alternate_message_id=new.meta_message_id);
+ evidence := evidence || jsonb_build_object('timestamp_basis',reason);
  select errors into reason from public.message_delivery_events where customer_id=new.customer_id
   and whatsapp_number_id=new.whatsapp_number_id and (message_id=new.meta_message_id or alternate_message_id=new.meta_message_id)
   and status='failed' order by occurred_at desc,id desc limit 1;
