@@ -454,7 +454,7 @@ router.post('/:id/reply', async (req, res) => {
     replyTo = await resolveOutgoingReplyContext(req.workspace.customerId, conversation, req.body?.reply_to_message_id)
 
     const result = await sendWorkspaceText({ number, customerId: req.workspace.customerId, to: contact.phone_number, body: message, replyToMessageId: replyTo?.meta_message_id })
-    const messageStatus = result.provider === 'gupshup' ? 'accepted' : 'sent'
+    const messageStatus = 'accepted'
     const now = new Date().toISOString()
     const { error: messageError } = await supabase.from('messages').insert({
       customer_id: req.workspace.customerId,
@@ -525,7 +525,7 @@ async function recordHumanRichMessage({ workspace, target, messageBody, media, m
   const { error: messageError } = await supabase.from('messages').insert({
     customer_id: workspace.customerId, whatsapp_number_id: target.number.id, contact_id: target.contact.id,
     conversation_id: target.conversation.id, direction: 'outbound', to_number: target.contact.phone_number,
-    message_body: messageBody || null, outbound_media: media, status: metaResult?.provider === 'gupshup' ? 'accepted' : 'sent', meta_message_id: metaResult?.messages?.[0]?.id || null, reply_to_message_id: replyTo?.id || null
+    message_body: messageBody || null, outbound_media: media, status: 'accepted', meta_message_id: metaResult?.messages?.[0]?.id || null, reply_to_message_id: replyTo?.id || null
   })
   if (messageError) throw messageError
   const { data: conversation, error } = await supabase.from('conversations').update({ last_message_at: now, last_outbound_at: now, updated_at: now })
@@ -559,7 +559,7 @@ router.post('/:id/location', async (req, res) => {
     if (!accessToken) return res.status(409).json({ error: 'The WhatsApp connection for this conversation is unavailable' })
     const metaResult = await sendLocationMessage(target.number.phone_number_id, target.contact.phone_number, location, accessToken, replyTo?.meta_message_id)
     const conversation = await recordHumanRichMessage({ workspace: req.workspace, target, messageBody: null, media: location, metaResult, eventType: 'human_location_sent', replyTo })
-    return res.json({ conversation, message_status: 'sent' })
+    return res.json({ conversation, message_status: 'accepted' })
   } catch (error) {
     return res.status(error.status || 502).json({ error: error.status ? error.message : 'Unable to send this location' })
   }
