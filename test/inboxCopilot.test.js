@@ -19,7 +19,8 @@ test('context is bounded and chronological, with no attachment content', () => {
   const conversations=Array.from({length:20},(_,i)=>({id:String(i)}))
   const messages=conversations.flatMap(c=>Array.from({length:12},(_,i)=>({conversation_id:c.id,id:String(i),message_body:'x'.repeat(5000),direction:'inbound'})))
   const context=contextFor(conversations,messages)
-  assert.equal(context[0].messages[0].id,'11')
+  assert.equal(contextFor([conversations[0]],messages)[0].messages[0].id,'11')
+  assert.ok(context.every(c=>c.messages.some(m=>m.text.startsWith('x'))))
   assert.ok(context.flatMap(c=>c.messages).reduce((sum,m)=>sum+(m.text.startsWith('[No readable')?0:m.text.length),0)<=16000)
 })
 test('model output cannot introduce foreign conversations, stages or actions', () => {

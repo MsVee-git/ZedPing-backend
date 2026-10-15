@@ -12,6 +12,7 @@ All reserved attempts count, including failures with uncertain provider usage. T
 Reservations are serialized per workspace in PostgreSQL; the API fails closed if accounting is unavailable.
 
 The summary samples the 20 most recently active unresolved conversations, not every conversation.
+It highlights up to eight actionable conversations and shares the context budget between threads.
 Each selected conversation contributes up to 12 recent text messages, within a combined 16,000-character budget.
 Drafts use up to five nonarchived knowledge sources through the existing approved-image revision resolver.
 Knowledge input is capped at 1,200 characters per source. The AI has no tools and no mutation capability.
