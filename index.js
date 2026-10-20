@@ -38,6 +38,7 @@ if (process.env.GUPSHUP_WEBHOOK_ENABLED === 'true') {
 }
 
 app.post('/invitations/preview', previewInvitation)
+app.post('/public/enquiries', require('./lib/landingLeads').createCaptureHandler(require('./lib/supabase')))
 app.post('/invitations/accept', requireAuthenticated, acceptInvitation)
 app.use('/messages', requireWorkspace, messageRoutes)
 app.use('/reports', requireWorkspace, reportRoutes)

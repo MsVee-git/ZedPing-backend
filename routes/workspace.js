@@ -8,6 +8,27 @@ const { recommendationsFor } = require('../lib/onboardingRecommendations')
 const PROFILE_FIELDS = ['business_name', 'contact_person', 'phone', 'country', 'industry', 'email']
 const WORKSPACE_COLUMNS = 'id, business_name, contact_person, phone, country, industry, email, subscription_plan, subscription_status, profile_completed_at, whatsapp_connected_at, onboarding_completed_at, onboarding_status, onboarded'
 
+function requireLeadManager(req, res, next) {
+  if (req.workspace.customerId !== require('../lib/landingLeads').CORELINE_WORKSPACE) return res.status(403).json({error:'Coreline administrator access required'})
+  next()
+}
+router.get('/website-enquiries', requireAdmin, requireLeadManager, async (req,res) => {
+  res.set('Cache-Control','no-store')
+  const page=Number(req.query.page||0)
+  if(!Number.isSafeInteger(page)||page<0||page>200)return res.status(400).json({error:'Invalid page'})
+  const result=await supabase.from('landing_page_leads').select('id,name,business_name,phone,email,interest,message,status,created_at,utm_source,utm_campaign')
+   .order('created_at',{ascending:false}).order('id',{ascending:false}).range(page*25,page*25+25)
+  if(result.error)return res.status(503).json({error:'Unable to load website enquiries'})
+  return res.json({leads:(result.data||[]).slice(0,25),has_more:(result.data||[]).length>25})
+})
+router.patch('/website-enquiries/:id', requireAdmin, requireLeadManager, async(req,res)=>{
+  if(!/^[0-9a-f-]{36}$/i.test(req.params.id)||!['new','contacted','qualified','closed'].includes(req.body?.status))return res.status(400).json({error:'Invalid enquiry update'})
+  const result=await supabase.from('landing_page_leads').update({status:req.body.status}).eq('id',req.params.id).select('id,status').maybeSingle()
+  if(result.error)return res.status(503).json({error:'Unable to save enquiry status'})
+  if(!result.data)return res.status(404).json({error:'Enquiry not found'})
+  return res.json(result.data)
+})
+
 function cleanText(value, label, { min = 1, max = 160, email = false } = {}) {
   if (typeof value !== 'string') throw new Error(`${label} is required`)
   const cleaned = value.trim()
