@@ -87,6 +87,36 @@ async function loadWhatsAppConnection(customerId) {
   return (data || []).find((number) => number.status === 'connected') || (data || [])[0] || null
 }
 
+
+router.get('/messaging-access', async (req, res) => {
+  res.set('Cache-Control', 'no-store')
+  try {
+    const customerId = req.workspace.customerId
+    const mapping = await supabase.from('gupshup_connection_mappings')
+      .select('id').eq('customer_id', customerId).limit(1)
+    if (mapping.error) throw mapping.error
+    if (!mapping.data?.length) return res.json({ state: 'not_managed' })
+    const now = new Date().toISOString()
+    const periods = await supabase.from('gupshup_usage_periods')
+      .select('period_start,period_end,allowance,reserved')
+      .eq('customer_id', customerId).eq('kind', 'template')
+      .lte('period_start', now).order('period_start', { ascending: false })
+    if (periods.error) throw periods.error
+    const active = (periods.data || []).filter(period => period.period_end > now)
+    if (active.length > 1) return res.json({ state: 'unavailable' })
+    if (!active.length) return res.json({ state: periods.data?.length ? 'renewal_required' : 'activation_required' })
+    const period = active[0]
+    return res.json({
+      state: period.reserved >= period.allowance ? 'allowance_exhausted' : 'active',
+      allowance: period.allowance, used: period.reserved,
+      remaining: Math.max(0, period.allowance - period.reserved),
+      period_start: period.period_start, period_end: period.period_end
+    })
+  } catch {
+    return res.status(503).json({ state: 'unavailable' })
+  }
+})
+
 router.get('/', async (req, res) => {
   try {
     const [workspace, whatsappConnection, discovery] = await Promise.all([
