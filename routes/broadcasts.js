@@ -1,3 +1,4 @@
+const { loadGroupLinks, loadWorkspaceContacts } = require('../lib/groupAudience')
 const { initialDelivery, addDelivery } = require('../lib/deliveryMetrics')
 const { sendWorkspaceText, sendWorkspaceTemplate, uploadWorkspaceMedia } = require('../lib/whatsappRuntime')
 const multer = require('multer')
@@ -77,17 +78,16 @@ async function audienceForGroup(workspace, groupId) {
     .select('id,name,description,total_contacts').eq('id', groupId).eq('customer_id', workspace).maybeSingle()
   if (groupError) throw groupError
   if (!group) return { error: 'This contact group is not available in the active workspace.', status: 403 }
-  const { data: links, error: linkError } = await supabase.from('contact_group_members').select('contact_id').eq('group_id', group.id)
-  if (linkError) throw linkError
-  const ids = [...new Set((links || []).map((item) => item.contact_id).filter(Boolean))]
+  const links = await loadGroupLinks(supabase, group.id)
+  const ids = [...new Set(links.map((item) => item.contact_id).filter(Boolean))]
   if (!ids.length) return { group, recipients: [] }
-  const { data: contacts, error: contactError } = await supabase.from('contacts')
-    .select('id,name,phone_number,email,custom_fields,marketing_opted_out').eq('customer_id', workspace).in('id', ids)
-  if (contactError) throw contactError
+  const contacts = await loadWorkspaceContacts(supabase, workspace, ids,
+    'id,name,phone_number,email,custom_fields,marketing_opted_out')
   return { group, recipients: dedupeRecipients(contacts || []) }
 }
 
 function fail(res, error) {
+  console.error('Broadcast preparation failed', { code: error?.code || null, type: error?.name || 'Error' })
   if (error instanceof MetaTemplateError) return res.status(400).json({ error: error.message })
   return res.status(502).json({ error: 'Broadcast details could not be prepared. Please try again.' })
 }

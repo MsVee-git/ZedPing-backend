@@ -1,3 +1,4 @@
+const { loadGroupLinks, loadWorkspaceContacts } = require('../lib/groupAudience')
 const express = require('express')
 const { requireAdmin } = require('../middleware/auth')
 const supabase = require('../lib/supabase')
@@ -103,23 +104,9 @@ router.get('/:groupId/members', async (req, res) => {
     const group = await findWorkspaceGroup(req.params.groupId, req.workspace.customerId)
     if (!group) return res.status(404).json({ error: 'Contact group not found.' })
 
-    const { data: links, error: linksError } = await supabase
-      .from('contact_group_members')
-      .select('id,contact_id')
-      .eq('group_id', group.id)
-    if (linksError) return sendDatabaseError(res, linksError, 'Could not load contact group members.')
-
-    const contactIds = (links || []).map((link) => link.contact_id)
-    let contacts = []
-    if (contactIds.length) {
-      const { data, error } = await supabase
-        .from('contacts')
-        .select('id,name,phone_number,tag,created_at')
-        .eq('customer_id', req.workspace.customerId)
-        .in('id', contactIds)
-      if (error) return sendDatabaseError(res, error, 'Could not load contact group members.')
-      contacts = data || []
-    }
+    const links = await loadGroupLinks(supabase, group.id)
+    const contacts = await loadWorkspaceContacts(supabase, req.workspace.customerId,
+      links.map(link => link.contact_id), 'id,name,phone_number,tag,created_at')
     const byId = new Map(contacts.map((contact) => [contact.id, contact]))
     res.json({
       group,
