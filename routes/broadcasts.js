@@ -88,6 +88,7 @@ async function audienceForGroup(workspace, groupId) {
 
 function fail(res, error) {
   console.error('Broadcast preparation failed', { code: error?.code || null, type: error?.name || 'Error' })
+  if (res.headersSent) return
   if (error instanceof MetaTemplateError) return res.status(400).json({ error: error.message })
   return res.status(502).json({ error: 'Broadcast details could not be prepared. Please try again.' })
 }
@@ -136,6 +137,8 @@ router.post('/review-template', requireAdmin, async (req, res) => {
 })
 
 router.post('/send-template', requireAdmin, parseBroadcastUpload, async (req, res) => {
+  let activeActivity = null
+  const results = []
   try {
     // The review is repeated at this boundary. Browser state is never a grant.
     const review = await templateReview(req.workspace.customerId, req.body || {})
@@ -150,7 +153,14 @@ router.post('/send-template', requireAdmin, parseBroadcastUpload, async (req, re
     const mediaId = needsMedia ? await uploadWorkspaceMedia({number:review.number,customerId:req.workspace.customerId,file:req.file}) : null
     const { data: activity, error: activityError } = await supabase.from('scheduled_broadcasts').insert({ customer_id: req.workspace.customerId, broadcast_name: String(req.body?.broadcast_name || review.template.name).trim().slice(0, 160) || review.template.name, contacts: review.recipients.map(({ id, name, phone_number }) => ({ id, name, phone_number })), message: '[Template] ' + review.template.name + ' (' + review.template.language + ')', phone_number_id: review.number.phone_number_id, scheduled_at: new Date().toISOString(), status: 'sending' }).select().single()
     if (activityError) throw activityError
-    const results = []
+    activeActivity = activity
+    // Persist the campaign before acknowledging it. The same server-side loop
+    // continues; the browser follows the saved record instead of holding a
+    // multi-minute HTTP request open. Older clients retain the final response.
+    if (req.headers?.prefer === 'respond-async') {
+      res.status(202).json({ success: true, status: 'sending', activity_id: activity.id,
+        total_recipients: review.recipients.length, opted_out_recipients: review.opted_out_recipients })
+    }
     for (const recipient of review.recipients) {
       try {
         const metaResult = await sendWorkspaceTemplate({number:review.number,customerId:req.workspace.customerId,to:recipient.phone_number,category:review.template.category,template:{ name: review.template.name, language: review.template.language, components: recipient.template_components, ...(mediaId ? { headerMedia: { type: mediaType, id: mediaId } } : {}) }})
@@ -160,12 +170,34 @@ router.post('/send-template', requireAdmin, parseBroadcastUpload, async (req, re
         await supabase.from('messages').insert({customer_id:req.workspace.customerId,whatsapp_number_id:review.number.id,direction:'outbound',broadcast_id:activity.id,to_number:recipient.phone_number,status:'failed'})
         results.push({ status: 'failed' })
       }
+      if (results.length % 5 === 0) {
+        const acceptedSoFar = results.filter(item => item.status === 'sent').length
+        try {
+          const progress = await supabase.from('scheduled_broadcasts')
+            .update({ sent_count: acceptedSoFar, failed_count: results.length - acceptedSoFar })
+            .eq('id', activity.id).eq('customer_id', req.workspace.customerId)
+          if (progress.error) console.error('Broadcast progress update failed', { code: progress.error.code || null })
+        } catch (_) { console.error('Broadcast progress update unavailable') }
+      }
     }
     const accepted = results.filter((item) => item.status === 'sent').length
     const failed = results.length - accepted
     await supabase.from('scheduled_broadcasts').update({ status: accepted ? 'completed' : 'failed', sent_count: accepted, failed_count: failed, completed_at: new Date().toISOString() }).eq('id', activity.id).eq('customer_id', req.workspace.customerId)
-    res.json({ success: true, activity_id: activity.id, accepted, failed, opted_out_recipients: review.opted_out_recipients })
-  } catch (error) { fail(res, error) }
+    if (!res.headersSent) res.json({ success: true, activity_id: activity.id, accepted, failed, opted_out_recipients: review.opted_out_recipients })
+  } catch (error) {
+    // Never turn a post-acknowledgement processing error into a second HTTP
+    // response, and never retry provider sends after an uncertain outcome.
+    if (activeActivity) {
+      try {
+        const accepted = results.filter(item => item.status === 'sent').length
+        await supabase.from('scheduled_broadcasts').update({ status: 'failed',
+          sent_count: accepted, failed_count: results.length - accepted,
+          completed_at: new Date().toISOString() })
+          .eq('id', activeActivity.id).eq('customer_id', req.workspace.customerId)
+      } catch (_) { console.error('Broadcast failure status could not be saved') }
+    }
+    fail(res, error)
+  }
 })
 
 router.post('/send', requireAdmin, async (req, res) => {
