@@ -128,3 +128,14 @@ test('Universal Token bypasses disabled legacy login and token retrieval', async
  assert.equal(calls[0].options.headers.Authorization,'Bearer private-universal');
  assert.equal(await client.getPartnerToken(),'private-universal');
 });
+
+test('subscription recovery reuses a complete subscription and updates only the ZedPing subscription',async()=>{
+ const secret='x'.repeat(48),options={callbackUrl:'https://example.com/hook',webhookSecret:secret};let writes=0,complete=true;
+ const client=createGupshupPartnerClient({email:'e',secret:'s',fetchImpl:async(url,request)=>{
+  if(!url.includes('/subscription'))return ok({token:'token'})
+  if(request.method==='PUT'){writes++;assert.ok(url.endsWith('/subscription/sub1'));const modes=new URLSearchParams(request.body).get('modes');for(const mode of ['SENT','DELIVERED','READ','FAILED'])assert.ok(modes.includes(mode));return ok({status:'success',subscription:{id:'sub1',appId:'app1',active:true}})}
+  return ok({subscriptions:[{id:'foreign',tag:'Other'}, {id:'sub1',tag:'ZedPing',appId:'app1',active:true,url:options.callbackUrl,version:3,meta:{'X-Gupshup-Webhook-Secret':secret},modes:complete?['ALL','SENT','DELIVERED','READ','FAILED']:['ALL']}]})
+ }})
+ assert.deepEqual(await client.ensureSubscription('app1',options),{subscriptionId:'sub1'});assert.equal(writes,0);complete=false;await client.ensureSubscription('app1',options);assert.equal(writes,1);
+ await assert.rejects(client.ensureSubscription('app1',{...options,callbackUrl:'http://private'}),/subscription_validation/)
+})

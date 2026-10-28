@@ -98,13 +98,13 @@ async function checklistFor(customerId, workspace) {
 async function loadWhatsAppConnection(customerId) {
   const { data, error } = await supabase
     .from('whatsapp_numbers')
-    .select('phone_number, display_name, status, created_at')
+    .select('id, phone_number, display_name, status, provisioning_state, provisioning_error, provisioned_at, created_at')
     .eq('customer_id', customerId)
     .order('created_at', { ascending: false })
   if (error) throw error
 
   // The customer UI supports one number today. It receives only display-safe
-  // connection data; IDs and credentials remain confined to the backend.
+  // connection data and its workspace-scoped row ID; credentials stay server-side.
   return (data || []).find((number) => number.status === 'connected') || (data || [])[0] || null
 }
 

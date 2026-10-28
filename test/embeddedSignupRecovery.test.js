@@ -108,3 +108,12 @@ test('a post-registration database interruption enters confirmation-required ins
   knownMetaRejection.response = { status: 400 }
   assert.deepEqual(failedProvisioningState({ registrationSubmitted: true, registrationConfirmed: false, error: knownMetaRejection }), { state: 'failed', error: 'registration_failed' })
 })
+
+test('registration reconciliation requires the exact phone and explicit CONNECTED status',async()=>{
+ let status='PENDING',returnedId='123456',gets=0;
+ const meta=createMetaEmbeddedSignupClient({env:{META_GRAPH_API_VERSION:'v26.0'},http:{get:async(url,options)=>{gets++;assert.ok(url.endsWith('/123456'));assert.equal(options.params.fields,'id,status');assert.equal(options.timeout,10000);return {data:{id:returnedId,status}}}}});
+ assert.equal((await meta.getRegistrationStatus('123456','vault-only')).connected,false);
+ status='CONNECTED';assert.equal((await meta.getRegistrationStatus('123456','vault-only')).connected,true);
+ returnedId='987654';assert.equal((await meta.getRegistrationStatus('123456','vault-only')).connected,false);
+ await assert.rejects(meta.getRegistrationStatus('../other','token'),/Invalid phone/);assert.equal(gets,3);
+})

@@ -108,7 +108,7 @@ async function runProvisioningClaim({ claim, loadCurrent, onClaimed, onOperation
 }
 
 function failedProvisioningState({ registrationSubmitted, registrationConfirmed, error }) {
-  const outcomeUnknown = registrationSubmitted && (registrationConfirmed || !error?.response)
+  const outcomeUnknown = registrationConfirmed || (registrationSubmitted && !error?.response)
   return outcomeUnknown
     ? { state: 'registration_confirmation_required', error: 'registration_outcome_unknown' }
     : { state: 'failed', error: 'registration_failed' }
@@ -290,7 +290,8 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
       completionStage = 'gupshup_app_link'
       const store = createGupshupConnectionStore(supabase)
       const existingMapping = await store.load({ customerId: req.workspace.customerId, connectionId: connection.id })
-      if (conflict.record && !existingMapping) {
+      const samePendingSignup = session.signup_phone_number_id === validated.phoneNumberId && connection.status === 'provisioning' && connection.provisioning_state === 'embedded_signup_completed'
+      if (conflict.record && !existingMapping && !samePendingSignup) {
         return res.status(409).json({ error: 'An existing connection requires the guided Gupshup migration process' })
       }
       const mapping = await store.ensure({ customerId: req.workspace.customerId, connectionId: connection.id, walletId: gupshupConfig.walletId })
@@ -361,6 +362,10 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
       completionStage = 'waba_subscription'
       await meta.subscribeApp(validated.wabaId, temporaryToken)
       completionStage = 'phone_registration'
+      let alreadyRegistered=false
+      try {alreadyRegistered=(await meta.getRegistrationStatus(validated.phoneNumberId,temporaryToken)).connected} catch {}
+      registrationConfirmed = alreadyRegistered
+      if(!alreadyRegistered){
       const { error: registrationAttemptError } = await supabase
         .from('whatsapp_numbers')
         .update({ provisioning_registration_attempted_at: new Date().toISOString() })
@@ -371,6 +376,7 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
       if (registrationAttemptError) throw registrationAttemptError
       registrationSubmitted = true
       await meta.registerPhone(validated.phoneNumberId, temporaryToken, registrationPin)
+      }
       registrationConfirmed = true
       const { data: operational, error: operationalError } = await supabase.from('whatsapp_numbers').update({ status: 'connected', provisioning_state: 'operational', provisioning_error: null, provisioned_at: new Date().toISOString() }).eq('id', connection.id).eq('customer_id', req.workspace.customerId).select('id, customer_id, phone_number, phone_number_id, whatsapp_business_account_id, display_name, status, provisioning_state, provisioning_error, provisioned_at').single()
       if (operationalError) throw operationalError
@@ -397,6 +403,33 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
     if (error instanceof MetaSignupError || error instanceof CredentialVaultError) return res.status(422).json({ error: 'Meta could not complete secure WhatsApp provisioning' })
     return res.status(500).json({ error: 'Unable to complete WhatsApp connection' })
   }
+})
+
+const reconciliationInFlight=new Map()
+router.post('/:id/provision/status', requireAdmin, async(req,res)=>{
+  res.set('Cache-Control','no-store')
+  if(!validId(req.params.id))return res.status(400).json({error:'Invalid connection'})
+  try {
+    const connection=await loadConnection(req.params.id,req.workspace.customerId)
+    if(!connection)return res.status(404).json({error:'Connection not found'})
+    if(connection.status==='connected')return res.json({phase:'complete',connection:provisioningView(connection)})
+    const key=`${req.workspace.customerId}:${connection.id}`
+    if(!reconciliationInFlight.has(key)){
+      const work=(async()=>{
+        const mapping=await createGupshupConnectionStore(supabase).load({customerId:req.workspace.customerId,connectionId:connection.id})
+        const config=mapping?gupshupConfigForCustomer(req.workspace.customerId):null
+        if(mapping&&!config)return {phase:'in_progress',connection}
+        const accessToken=mapping?null:await createCredentialVault().get({customerId:req.workspace.customerId,integration:'meta_whatsapp',credentialKey:`phone_${connection.phone_number_id}`})
+        return require('../lib/whatsappConnectionReconciliation').reconcileWhatsAppConnection({db:supabase,customerId:req.workspace.customerId,connection,mapping,
+          partner:config?createGupshupPartnerClient(config):null,meta:mapping?null:createMetaEmbeddedSignupClient(),accessToken,
+          callbackUrl:config?.callbackUrl,webhookSecret:process.env.GUPSHUP_WEBHOOK_SECRET,
+          routingReady:Boolean(config && gupshupConfigForCustomer(req.workspace.customerId,process.env,'messaging') && process.env.GUPSHUP_WEBHOOK_ENABLED==='true' && process.env.GUPSHUP_WORKER_ENABLED==='true' && process.env.GUPSHUP_WEBHOOK_SECRET?.length>=32)})
+      })().finally(()=>reconciliationInFlight.delete(key))
+      reconciliationInFlight.set(key,work)
+    }
+    const result=await reconciliationInFlight.get(key)
+    return res.json({phase:result.phase,connection:provisioningView(result.connection)})
+  } catch {return res.status(503).json({error:'Activation is still being checked. Your existing setup has been preserved; check again shortly.'})}
 })
 
 router.post('/:id/provision/retry', requireAdmin, async (req, res) => {
@@ -441,6 +474,10 @@ router.post('/:id/provision/retry', requireAdmin, async (req, res) => {
     let registrationConfirmed = false
     try {
       await meta.subscribeApp(connection.whatsapp_business_account_id, token)
+      let alreadyRegistered=false
+      try {alreadyRegistered=(await meta.getRegistrationStatus(connection.phone_number_id,token)).connected} catch {}
+      registrationConfirmed = alreadyRegistered
+      if(!alreadyRegistered){
       const { error: registrationAttemptError } = await supabase.from('whatsapp_numbers')
         .update({ provisioning_registration_attempted_at: new Date().toISOString() })
         .eq('id', connection.id)
@@ -450,6 +487,7 @@ router.post('/:id/provision/retry', requireAdmin, async (req, res) => {
       if (registrationAttemptError) throw registrationAttemptError
       registrationSubmitted = true
       await meta.registerPhone(connection.phone_number_id, token, registrationPin)
+      }
       registrationConfirmed = true
       const { data: operational, error: operationalError } = await supabase.from('whatsapp_numbers').update({ status: 'connected', provisioning_state: 'operational', provisioning_error: null, provisioned_at: new Date().toISOString() }).eq('id', connection.id).eq('customer_id', req.workspace.customerId).select('id, customer_id, phone_number, phone_number_id, whatsapp_business_account_id, display_name, status, provisioning_state, provisioning_error, provisioned_at').single()
       if (operationalError) throw operationalError

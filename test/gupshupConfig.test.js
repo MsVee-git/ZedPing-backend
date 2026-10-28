@@ -11,3 +11,10 @@ test('selected workspaces fail closed with incomplete or unsafe configuration', 
  assert.throws(() => gupshupConfigForCustomer('test-workspace', { ...env, GUPSHUP_PARTNER_SECRET: '' }), /incomplete/)
  assert.throws(() => gupshupConfigForCustomer('test-workspace', { ...env, GUPSHUP_CALLBACK_URL: 'http://example.com' }), /invalid/)
 })
+test('production onboarding permits paid client setup while explicit switches still fail closed',()=>{
+ const production={...env,GUPSHUP_PRODUCTION_ONBOARDING:'true',GUPSHUP_ROUTING_ENABLED:'true'}
+ assert.equal(gupshupConfigForCustomer('new-client',production).solutionId,'123456')
+ assert.ok(gupshupConfigForCustomer('new-client',production,'messaging'))
+ assert.equal(gupshupConfigForCustomer('new-client',{...production,GUPSHUP_ONBOARDING_ENABLED:'false'}),null)
+ assert.equal(gupshupConfigForCustomer('new-client',{...production,GUPSHUP_ROUTING_ENABLED:'false'},'messaging'),null)
+})
