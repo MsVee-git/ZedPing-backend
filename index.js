@@ -70,6 +70,9 @@ const stopGupshupWorker = require('./lib/gupshupWorkerLoop').startGupshupWorkerL
 })
 process.once('SIGTERM', stopGupshupWorker)
 process.once('SIGINT', stopGupshupWorker)
+const stopLeadNotifications = require('./lib/landingLeadNotifications').startLeadNotifications({ db: require('./lib/supabase'), onError: message => console.error(message) })
+process.once('SIGTERM', stopLeadNotifications)
+process.once('SIGINT', stopLeadNotifications)
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => {
   console.log(`ZedPing backend running on port ${PORT}`)
