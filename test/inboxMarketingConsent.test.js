@@ -7,8 +7,8 @@ const vm = require('node:vm')
 function inbox() {
   const routes = new Map(), queries = []
   const rows = [
-    { id: 'out', customer_id: 'a', control_mode: 'automation', status: 'open', contacts: { id: 'contact-a', marketing_opted_out: true } },
-    { id: 'in', customer_id: 'a', control_mode: 'human', status: 'open', contacts: { id: 'contact-b', marketing_opted_out: false } },
+    { id: 'out', customer_id: 'a', whatsapp_number_id:'number-a', control_mode: 'automation', status: 'open', contacts: { id: 'contact-a', marketing_opted_out: true } },
+    { id: 'in', customer_id: 'a', whatsapp_number_id:'number-a', control_mode: 'human', status: 'open', contacts: { id: 'contact-b', marketing_opted_out: false } },
     { id: 'foreign', customer_id: 'b', contacts: { id: 'contact-c', marketing_opted_out: true } }
   ]
   const supabase = { from(table) {
@@ -31,6 +31,7 @@ function inbox() {
   const context = { module: { exports: {} }, require(name) {
     if (name === 'express') return { Router: () => router }
     if (name === '../lib/supabase') return supabase
+    if (name === '../lib/inboxOutboundHistory') return require('../lib/inboxOutboundHistory')
     if (name === '../lib/inboxTriage') return require('../lib/inboxTriage')
     return {}
   } }

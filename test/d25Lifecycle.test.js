@@ -72,7 +72,7 @@ test('paused draft edits preserve the paused lifecycle and Resume loads the immu
   const end = routeSource.indexOf('\nrouter.', start + 1)
   const draft = routeSource.slice(start, end)
   const resume = routeBody('/:id/resume')
-  assert.match(draft, /current\.lifecycle_status === 'paused' \? 'paused' : 'draft'/)
+  assert.match(draft, /lifecycle_status:current\.lifecycle_status/)
   assert.match(resume, /activatedVersionForAgent/)
   assert.match(routeSource, /not\('activated_at','is',null\)/)
   assert.doesNotMatch(resume, /knowledgeForAgent\(/)

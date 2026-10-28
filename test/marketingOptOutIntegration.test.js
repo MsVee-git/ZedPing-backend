@@ -18,6 +18,8 @@ function database(seed) {
     const q = {
       select(value = '*') { columns = value; return q },
       eq(key, value) { filters.push(row => row[key] === value); return q },
+      gt(key, value) { filters.push(row => row[key] > value); return q },
+      is(key, value) { filters.push(row => (row[key] ?? null) === value); return q },
       in(key, values) { filters.push(row => values.includes(row[key])); return q },
       order(key) { sort = key; return q },
       range(start, end) { window = [start, end]; return q },
@@ -65,6 +67,14 @@ function loadRoute(file, db) {
   const stubs = {
     express: { Router: () => router },
     '../lib/supabase': db,
+    multer: Object.assign(()=>({single:()=>()=>{}}),{memoryStorage:()=>({})}),
+    '../lib/whatsappCredentials': {},
+    '../lib/deliveryReceipts': {},
+    '../lib/whatsappRuntime': {
+      sendWorkspaceText: async ({number,to,body}) => stubs['../lib/whatsapp'].sendTextMessage(number.phone_number_id,to,body),
+      sendWorkspaceTemplate: async ({number,to,template}) => stubs['../lib/whatsapp'].sendTemplateMessage(number.phone_number_id,to,template),
+      uploadWorkspaceMedia: async()=>{throw Error('This fixture must not upload media')}
+    },
     '../middleware/auth': { requireAdmin() {} },
     '../lib/whatsapp': {
       async sendTextMessage(...args) { sent.push({ kind: 'text', args }); return { messages: [{ id: 'mock-outbound' }] } },
@@ -81,7 +91,7 @@ function loadRoute(file, db) {
     '../lib/replyContext': { parseInboundReplyContext() { return null }, aiReplyContext() { return null } },
     '../lib/inboundMedia': { parseInboundMedia(message) { return { body: message?.text?.body || '', media: null } } }
   }
-  const real = new Set(['crypto', '../lib/marketingOptOut', '../lib/broadcastRecipients', '../lib/broadcastTemplates', '../lib/metaTemplates', '../lib/contactImport', '../lib/conversationState', '../lib/inboundWebhookEvents'])
+  const real = new Set(['crypto', '../lib/marketingOptOut', '../lib/broadcastRecipients', '../lib/broadcastTemplates', '../lib/metaTemplates', '../lib/contactImport', '../lib/conversationState', '../lib/inboundWebhookEvents', '../lib/groupAudience', '../lib/deliveryMetrics', '../lib/templateMedia'])
   const context = {
     module: { exports: {} }, Buffer, process: { env: {} }, console,
     require(id) { if (id in stubs) return stubs[id]; if (real.has(id)) return localRequire(id); throw new Error(`Unexpected dependency ${id}`) },
@@ -111,7 +121,7 @@ function fixture(contacts = [contact('eligible', '+260971000001'), contact('out'
 const selection = { whatsapp_number_id: 'number-a', contact_group_id: 'group-a', template_id: 'template-a', variable_mappings: { 1: { source: 'contact_name' } } }
 async function request(route, url, body = selection, workspace = 'a') {
   const result = { status: 200 }
-  const response = { status(code) { result.status = code; return response }, json(value) { result.body = JSON.parse(JSON.stringify(value)); return response } }
+  const response = { set() { return response }, status(code) { result.status = code; return response }, json(value) { result.body = JSON.parse(JSON.stringify(value)); return response } }
   await route.routes.get(url)({ workspace: { customerId: workspace }, body }, response)
   return result
 }
@@ -299,7 +309,7 @@ test('broadcast details report persisted history without consulting current cons
   const route = loadRoute('broadcasts', db)
   const read = async workspace => {
     const result = { status: 200 }
-    const res = { status(code) { result.status = code; return res }, json(body) { result.body = JSON.parse(JSON.stringify(body)) } }
+    const res = { set(){ return res }, status(code) { result.status = code; return res }, json(body) { result.body = JSON.parse(JSON.stringify(body)) } }
     await route.routes.get('/scheduled/:id')({ workspace: { customerId: workspace }, params: { id: 'history' } }, res)
     return result
   }
@@ -316,5 +326,5 @@ test('broadcast details report persisted history without consulting current cons
   assert.deepEqual((await read('a')).body, result.body)
   assert.equal((await read('b')).status, 404)
   assert.deepEqual(db.tables.scheduled_broadcasts, original)
-  assert.ok(db.calls.every(call => call.table === 'scheduled_broadcasts' && call.operation === 'select'))
+  assert.ok(db.calls.every(call => ['scheduled_broadcasts','messages'].includes(call.table) && call.operation === 'select'))
 })

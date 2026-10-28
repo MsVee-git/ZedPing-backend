@@ -7,7 +7,9 @@ test('Automation Library only recommends available recipes with deterministic sc
   const second = recommend({ industry: 'education', goals: ['customer_support'] })
   assert.deepEqual(first.map((item) => item.id), second.map((item) => item.id))
   assert.ok(first.every((item) => item.availability === 'available'))
-  assert.equal(first[0].id, 'school_fees')
+  assert.equal(first[0].id, 'admissions_enquiry')
+  assert.equal(first[0].recommendation_score,5)
+  assert.equal(recommend({industry:'education',goals:['customer_support','payments_collections']})[0].id,'school_fees')
 })
 
 test('Automation Library provenance must match the server catalogue and capability', () => {

@@ -41,11 +41,24 @@ function response() {
   return { statusCode: 200, status(code) { this.statusCode = code; return this }, json(body) { this.body = body; return this } }
 }
 
+// Exercise the real shared runtime. Provider discovery is isolated to an
+// unmapped Meta connection; only transport and server credential IO are mocked.
+function runtime(db, tokenResolver, transport = whatsapp) {
+ return moduleWith('lib/whatsappRuntime.js', {
+  'node:crypto':require('node:crypto'), './supabase':db, './whatsapp':transport,
+  './whatsappCredentials':{resolveWhatsAppAccessToken:tokenResolver},
+  './gupshupPartner':{}, './gupshupConfig':{},
+  './gupshupConnectionStore':{createGupshupConnectionStore:()=>({load:async({customerId,connectionId})=>{
+   assert.equal(customerId,customer);assert.equal(connectionId,number.id);return null;
+  }})}
+ }).exported
+}
+
 // Execute the production outgoing function used by keyword, flow and AI replies.
 function botOutgoing(db, tokenResolver) {
   const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhook.js'), 'utf8')
   const code = source.slice(source.indexOf('async function outgoing('), source.indexOf('async function workspaceAutomationSettings('))
-  const sandbox = { supabase: db, sendTextMessage: whatsapp.sendTextMessage, resolveWhatsAppAccessToken: tokenResolver }
+  const sandbox = { supabase: db, ...runtime(db,tokenResolver) }
   vm.runInNewContext(code + '\nthis.outgoing = outgoing', sandbox)
   return sandbox.outgoing
 }
@@ -81,6 +94,7 @@ test('direct messaging route uses client credentials and returns no token', asyn
   const sends = []
   const { routes } = moduleWith('routes/messages.js', {
     '../lib/supabase': db,
+    '../lib/whatsappRuntime': runtime(db,resolver(),{sendTextMessage:async(...args)=>{sends.push(args);return {messages:[{id:'accepted-id'}]}}}),
     '../lib/whatsappCredentials': { resolveWhatsAppAccessToken: resolver() },
     '../lib/whatsapp': { sendTextMessage: async (...args) => { sends.push(args); return { messages: [{ id: 'accepted-id' }] } } }
   })
@@ -120,7 +134,7 @@ test('template catalog stops before Meta when a signup credential is missing', a
 
 for (const mode of ['plain', 'template']) {
   for (const missing of [false, true]) {
-    test(`${mode} broadcast ${missing ? 'blocks missing credentials before creating an activity' : 'resolves the client credential once for all recipients'}`, async () => {
+    test(`${mode} broadcast ${missing ? 'records submission failures without sending when credentials are missing' : 'uses the client credential for every recipient'}`, async () => {
       const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'broadcasts.js'), 'utf8')
       const marker = mode === 'plain' ? "router.post('/send'," : "router.post('/send-template',"
       const end = mode === 'plain' ? "router.get('/scheduled'" : "router.post('/send',"
@@ -128,33 +142,39 @@ for (const mode of ['plain', 'template']) {
       let lookups = 0, handler
       const recipients = [{ phone_number: '260700000000' }, { phone_number: '260700000001' }]
       const db = { from(table) {
-        const q = { insert(value) { writes.push({ table, value }); return q }, select() { return q }, single: async () => ({ data: { id: 'activity' }, error: null }), update() { return q }, eq() { return q }, then(resolve, reject) { return Promise.resolve({ error: null }).then(resolve, reject) } }
+        const q = { insert(value) { writes.push({ table, value }); return q }, select() { return q }, single: async () => ({ data: { id: 'activity' }, error: null }), update(value) { writes.push({table,update:value}); return q }, eq() { return q }, then(resolve, reject) { return Promise.resolve({ error: null }).then(resolve, reject) } }
         return q
       } }
+      const transport={sendTextMessage:async(...args)=>{sends.push(args);return {messages:[{id:'accepted-text'}]}},sendTemplateMessage:async(...args)=>{sends.push(args);return {messages:[{id:'accepted-template'}]}}};
+      const shared=runtime(db,async(...args)=>{lookups++;return resolver(missing?null:'client-signup-token')(...args)},transport);
       const sandbox = {
-        router: { post(_p, _auth, fn) { handler = fn } }, requireAdmin: () => {}, supabase: db,
+        ...shared,parseBroadcastUpload:()=>{},
+        router: { post(_p, ...handlers) { handler = handlers.at(-1) } }, requireAdmin: () => {}, supabase: db,
         numberFor: async () => number,
         recipientsForWorkspace: async () => ({ recipients }),
         filterWorkspaceMarketingRecipients: async () => ({ eligible: recipients, optedOut: [] }),
         templateReview: async () => ({ number, template: { name: 'welcome', language: 'en' }, eligible_recipients: 2, recipients, opted_out_recipients: 0 }),
         renderedTemplatePreview: () => 'Welcome',
-        resolveWhatsAppAccessToken: async (...args) => { lookups++; return resolver(missing ? null : 'client-signup-token')(...args) },
-        sendTextMessage: async (...args) => { sends.push(args); return {} },
-        sendTemplateMessage: async (...args) => { sends.push(args); return {} },
         fail: (res) => res.status(502).json({ error: 'unavailable' })
       }
       vm.runInNewContext(source.slice(source.indexOf(marker), source.indexOf(end)), sandbox)
       const res = response()
       await handler({ workspace: { customerId: customer }, body: { contacts: recipients, message: 'Hello', phoneNumberId: number.id } }, res)
-      assert.equal(lookups, 1)
+      assert.equal(lookups, 2)
       if (missing) {
-        assert.equal(res.statusCode, 502)
-        assert.equal(writes.length, 0)
+        assert.equal(res.statusCode, 200)
+        assert.equal(res.body.accepted,0)
+        assert.equal(res.body.failed,2)
+        assert.equal(writes.filter(w=>w.table==='messages'&&w.value?.status==='failed').length,2)
+        assert.ok(writes.some(w=>w.table==='scheduled_broadcasts'&&w.update?.status==='failed'))
         assert.equal(sends.length, 0)
       } else {
         assert.equal(res.statusCode, 200)
         assert.equal(sends.length, 2)
         assert.ok(sends.every(args => args[3] === 'client-signup-token'))
+        assert.equal(res.body.accepted,2)
+        assert.equal(res.body.failed,0)
+        assert.ok(writes.filter(w=>w.table==='messages').every(w=>w.value.meta_message_id))
         assert.ok(!JSON.stringify({ response: res.body, writes }).includes('client-signup-token'))
       }
     })

@@ -91,7 +91,8 @@ test('knowledge resolution remains workspace-scoped and live retrieval uses inbo
   const runtimeSource = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhook.js'), 'utf8')
   const agentsSource = fs.readFileSync(path.join(__dirname, '..', 'routes', 'aiAgents.js'), 'utf8')
   assert.match(knowledgeSource, /\.eq\('customer_id',customerId\)/)
-  assert.match(runtimeSource, /buildLiveSystem\(agent, version, ctx\.body\)/)
+  assert.match(runtimeSource, /const customerTurn = quotedContext \?[\s\S]*: ctx\.body/);
+  assert.match(runtimeSource, /buildLiveSystem\(agent, version, customerTurn\)/)
   assert.match(agentsSource, /changes_not_live_yet/)
   assert.match(agentsSource, /draftDiffersFromActivated/)
 })
