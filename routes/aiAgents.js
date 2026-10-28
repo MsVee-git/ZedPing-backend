@@ -278,7 +278,8 @@ router.post('/:id/archive',requireAdmin,async(req,res)=>{
     res.json({agent:safeAgent(data)})
   } catch(error){res.status(400).json({error:error.message||'Unable to archive AI Agent'})}
 })
-async function activationReadiness(customerId, agent, { allowActiveUpdate = false } = {}) {
+async function activationReadiness(customerId, agent, { allowActiveUpdate = false, activationMode = 'test' } = {}) {
+  if (!['test','live'].includes(activationMode)) throw new Error('Choose Test Mode or Live')
   if (!agent.name?.trim()) throw new Error('Set a customer-facing assistant name before activation')
   const mayActivate = agent.lifecycle_status === 'draft' || agent.lifecycle_status === 'paused' || (allowActiveUpdate && isActiveAgent(agent))
   if (!mayActivate) throw new Error(allowActiveUpdate ? 'Only an active AI Agent can update its live configuration' : 'Only draft or paused AI Agents can be activated')
@@ -296,7 +297,7 @@ async function activationReadiness(customerId, agent, { allowActiveUpdate = fals
   // Draft activation always enters Test Mode, and an active Test agent must
   // retain its allowlist. A Live agent's Update Live action keeps its Live
   // mode, where ordinary eligible customers are intentionally not allowlisted.
-  const requiresTestContact = !allowActiveUpdate || deploymentMode(agent) === 'test'
+  const requiresTestContact = allowActiveUpdate ? deploymentMode(agent) === 'test' : activationMode === 'test'
   if (requiresTestContact) {
     const { data: tests, error: testError } = await supabase.from('ai_agent_test_contacts').select('id')
       .eq('customer_id', customerId).eq('agent_id', agent.id)
@@ -306,9 +307,9 @@ async function activationReadiness(customerId, agent, { allowActiveUpdate = fals
   return knowledge
 }
 
-async function activateCurrentConfiguration(customerId, agent, userId, { allowActiveUpdate = false, onStage = null } = {}) {
+async function activateCurrentConfiguration(customerId, agent, userId, { allowActiveUpdate = false, onStage = null, activationMode = 'test' } = {}) {
   onStage?.('readiness')
-  const knowledge = await activationReadiness(customerId, agent, { allowActiveUpdate })
+  const knowledge = await activationReadiness(customerId, agent, { allowActiveUpdate, activationMode })
   onStage?.('current_version')
   const existingActivated = await activatedVersionForAgent(customerId, agent)
   if (allowActiveUpdate && isActiveAgent(agent) && !changesNotLiveYet(agent, knowledge, existingActivated)) {
@@ -318,7 +319,7 @@ async function activateCurrentConfiguration(customerId, agent, userId, { allowAc
   onStage?.('snapshot')
   const snapshot = knowledgeSnapshot(knowledge)
   if (!snapshot.length) throw new Error('Select at least one eligible approved knowledge item before activation')
-  const targetMode = allowActiveUpdate && isActiveAgent(agent) ? deploymentMode(agent) : 'test'
+  const targetMode = allowActiveUpdate && isActiveAgent(agent) ? deploymentMode(agent) : activationMode
   onStage?.('atomic_promotion')
   const { data, error } = await supabase.rpc('activate_ai_agent_version', {
     p_customer_id:customerId,
@@ -400,7 +401,7 @@ router.delete('/:id/test-contacts/:contactId', requireAdmin, async (req,res) => 
 router.get('/:id/readiness', requireAdmin, async (req,res) => {
   try {
     const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
-    const knowledge = await activationReadiness(req.workspace.customerId, agent)
+    const knowledge = await activationReadiness(req.workspace.customerId, agent, { activationMode:req.query?.mode || 'test' })
     res.json({ready:true, assistant_name:agent.name, whatsapp_number_id:agent.whatsapp_number_id, knowledge_sources:knowledge.map(item=>item.name), handoff:agent.zoe_configuration?.handoff || {}})
   } catch(error) { res.status(400).json({ready:false,error:error.message || 'This AI Agent is not ready'}) }
 })
@@ -408,7 +409,7 @@ router.get('/:id/readiness', requireAdmin, async (req,res) => {
 router.post('/:id/activate', requireAdmin, async (req,res) => {
   try {
     const agent = await agentForWorkspace(req.workspace.customerId, req.params.id)
-    const result = await activateCurrentConfiguration(req.workspace.customerId, agent, req.workspace.userId)
+    const result = await activateCurrentConfiguration(req.workspace.customerId, agent, req.workspace.userId, { activationMode:req.body?.mode || 'test' })
     res.json({
       agent:safeAgent(result.agent,result.knowledge.map(({text_content,...safe})=>safe),{
         activated_configuration_version:result.version,
