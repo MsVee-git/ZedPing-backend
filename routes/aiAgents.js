@@ -9,6 +9,7 @@ const { buildLiveSystem, configuredHandoff, handoffReply, removeHandoffMarker, r
 const { normaliseCommercialAction, commercialTurn } = require('../lib/zoeCommercial')
 const { knowledgeSnapshot, draftDiffersFromActivated, resolveEligibleKnowledge } = require('../lib/aiAgentKnowledge')
 const { deploymentMode, isActiveAgent, mayGoLive, mayReturnToTest } = require('../lib/aiDeploymentMode')
+const { MAX_AGENT_ATTACHMENTS, resolveAttachments, publicAttachment } = require('../lib/contentLibraryAttachments')
 
 const MAX_KNOWLEDGE_ITEMS = 5
 const MAX_KNOWLEDGE_ITEM_CHARS = 3000
@@ -77,11 +78,12 @@ function changesNotLiveYet(agent, knowledge, version) {
   return draftDiffersFromActivated(version, activatedConfiguration(agent), knowledge)
 }
 function safeAgent(agent, knowledge = [], liveState = {}) {
+  const configuration = agent.zoe_configuration || {}
   return {
     id:agent.id, name:agent.name, agent_type:agent.agent_type, lifecycle_status:agent.lifecycle_status,
     whatsapp_number_id:agent.whatsapp_number_id, configuration_version:agent.configuration_version,
     created_at:agent.created_at, archived_at:agent.archived_at, template_key:agent.zoe_template_key, deployment_mode:agent.deployment_mode || 'test',
-    configuration:agent.zoe_configuration || {}, knowledge,
+    configuration:{ ...configuration, shareable_attachments:(configuration.shareable_attachments || []).map(publicAttachment) }, knowledge,
     activated_configuration_version:liveState.activated_configuration_version || null,
     changes_not_live_yet:Boolean(liveState.changes_not_live_yet)
   }
@@ -108,7 +110,7 @@ async function selectedKnowledge(customerId, ids) {
   if(items.length !== unique.length) throw new Error('Every knowledge item must be active approved knowledge from this workspace')
   return items
 }
-function readConfig(body) {
+async function readConfig(body, customerId) {
   const template = templateFor(cleanText(body?.template_key, 'Template', 80, true))
   const name = cleanText(body?.assistant_name, 'Assistant name', 160, true)
   const style = String(body?.communication_style || 'professional').toLowerCase()
@@ -116,8 +118,10 @@ function readConfig(body) {
   const handoff = body?.handoff && typeof body.handoff === 'object' && !Array.isArray(body.handoff) ? body.handoff : {}
   const phrases = Array.isArray(handoff.phrases) ? [...new Set(handoff.phrases.map(value => cleanText(value, 'Escalation phrase', 100)).filter(Boolean))].slice(0, 5) : []
   const commercialAction = normaliseCommercialAction(body?.commercial_action)
+  const attachmentIds = Array.isArray(body?.shareable_content_item_ids) ? body.shareable_content_item_ids : []
+  const attachments = await resolveAttachments(supabase, customerId, attachmentIds)
   return { template, name, agentType:TYPES.has(body?.agent_type) ? body.agent_type : (template.key === 'sales_interest' ? 'sales' : template.key === 'static_availability' ? 'booking' : 'support'),
-    configuration:{ communication_style:style, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases }, ...(commercialAction ? { commercial_action:commercialAction } : {}), knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
+    configuration:{ communication_style:style, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases }, ...(commercialAction ? { commercial_action:commercialAction } : {}), shareable_content_item_ids:attachments.map(item => item.id), shareable_attachments:attachments, knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
 }
 function buildSystem(agent, knowledge, question) {
   return buildLiveSystem(agent, { configuration:activatedConfiguration(agent), knowledge_snapshot:knowledgeSnapshot(knowledge) }, question).prompt
@@ -174,6 +178,16 @@ router.get('/knowledge-items', async (req,res) => {
     res.json({ items:items.map(item=>({id:item.id,name:item.name,description:item.description,updated_at:item.updated_at,source_type:item.source_type})), limits:{max_items:MAX_KNOWLEDGE_ITEMS,max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS,max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS} })
   } catch (_) { res.status(500).json({error:'Unable to load approved knowledge'}) }
 })
+router.get('/shareable-items', async (req,res) => {
+  try {
+    const { data, error } = await supabase.from('content_library_items').select('id,name,description,content_type,mime_type,file_size,archived_at')
+      .eq('customer_id', req.workspace.customerId).is('archived_at', null).in('content_type',['IMAGE','DOCUMENT']).order('updated_at',{ascending:false})
+    if (error) throw error
+    const items = (data || []).filter(item => (item.content_type === 'IMAGE' && ['image/jpeg','image/png','image/webp'].includes(item.mime_type)) || (item.content_type === 'DOCUMENT' && item.mime_type === 'application/pdf'))
+      .map(item => ({ id:item.id, name:item.name, description:item.description, source_type:item.content_type === 'IMAGE' ? 'image' : 'pdf', mime_type:item.mime_type, file_size:item.file_size }))
+    res.json({ items, limits:{ max_items:MAX_AGENT_ATTACHMENTS } })
+  } catch (_) { res.status(500).json({ error:'Unable to load shareable files' }) }
+})
 router.get('/numbers', async (req,res) => {
   const { data, error } = await supabase.from('whatsapp_numbers').select('id,phone_number,status').eq('customer_id',req.workspace.customerId).eq('status','connected')
   if (error) return res.status(500).json({error:'Unable to load connected WhatsApp numbers'})
@@ -196,7 +210,7 @@ router.get('/', async (req,res) => {
 })
 router.post('/drafts', requireAdmin, async (req,res) => {
   try {
-    const input = readConfig(req.body)
+    const input = await readConfig(req.body, req.workspace.customerId)
     const number = await workspaceNumber(req.workspace.customerId, req.body?.whatsapp_number_id)
     const knowledge = await selectedKnowledge(req.workspace.customerId, req.body?.knowledge_item_ids)
     const { data:agent, error } = await supabase.from('ai_agents').insert({
@@ -214,7 +228,7 @@ router.patch('/:id/draft', requireAdmin, async (req,res) => {
   try {
     const current = await agentForWorkspace(req.workspace.customerId, req.params.id)
     if (!['draft','paused','active'].includes(current.lifecycle_status)) throw new Error('Only a draft, paused, or active AI Agent can be edited')
-    const input = readConfig(req.body)
+    const input = await readConfig(req.body, req.workspace.customerId)
     const number = await workspaceNumber(req.workspace.customerId, req.body?.whatsapp_number_id || current.whatsapp_number_id)
     // Live routing selects an agent by its bound number before loading the
     // immutable activated version. Letting an active draft change that binding

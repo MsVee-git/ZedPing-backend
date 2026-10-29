@@ -15,6 +15,7 @@ const { closeActiveAiSessionsForConversation } = require('../lib/aiAgentSessions
 const { storedInboundAttachment, publicInboundMedia } = require('../lib/inboundMedia')
 const { fetchWhatsAppMedia, WhatsAppMediaError } = require('../lib/whatsappMedia')
 const { validateOutboundUpload, parseLocation, storedAttachment, publicMessageMedia } = require('../lib/conversationMedia')
+const { CONTENT_BUCKET } = require('../lib/contentLibrary')
 
 function parseConversationUpload(req, res, next) {
   // Some isolated route tests intentionally provide a no-op multer shim. The
@@ -272,9 +273,18 @@ router.get('/:id/messages/:messageId/media', async (req, res) => {
       .maybeSingle()
     if (numberError) throw numberError
     if (!number) return res.status(404).json({ error: 'Attachment is unavailable' })
-    const accessToken = await resolveWhatsAppAccessToken(number, { customerId: req.workspace.customerId })
-    if (!accessToken) return res.status(404).json({ error: 'Attachment is unavailable' })
-    const media = await fetchWhatsAppMedia({ mediaId: attachment.mediaId, accessToken, expectedType: attachment.type })
+    let media
+    if (message.direction === 'outbound' && attachment.storagePath) {
+      const expectedPrefix = `${req.workspace.customerId}/`
+      if (!attachment.storagePath.startsWith(expectedPrefix)) return res.status(404).json({ error: 'Attachment is unavailable' })
+      const { data: blob, error: storageError } = await supabase.storage.from(CONTENT_BUCKET).download(attachment.storagePath)
+      if (storageError || !blob) return res.status(404).json({ error: 'Attachment is unavailable' })
+      media = { buffer: Buffer.from(await blob.arrayBuffer()), mimeType: attachment.mimeType }
+    } else {
+      const accessToken = await resolveWhatsAppAccessToken(number, { customerId: req.workspace.customerId })
+      if (!accessToken) return res.status(404).json({ error: 'Attachment is unavailable' })
+      media = await fetchWhatsAppMedia({ mediaId: attachment.mediaId, accessToken, expectedType: attachment.type })
+    }
     const mimeType = media.mimeType || attachment.mimeType || 'application/octet-stream'
     res.set({ 'Content-Type': mimeType, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', ...(attachment.type === 'document' ? { 'Content-Disposition': `attachment; filename="${String(attachment.filename || 'document').replace(/["\\\r\n]/g, '_')}"` } : {}) })
     return res.status(200).send(media.buffer)

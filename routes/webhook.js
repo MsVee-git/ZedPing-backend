@@ -1,4 +1,4 @@
-const { sendWorkspaceText } = require('../lib/whatsappRuntime')
+const { sendWorkspaceText, sendWorkspaceAttachment } = require('../lib/whatsappRuntime')
 const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
 const { persistMetaDeliveryPayload } = require('../lib/deliveryReceipts')
 const express = require('express')
@@ -24,6 +24,7 @@ const { commercialTurn, commercialMetadata } = require('../lib/zoeCommercial')
 const { mayExecute } = require('../lib/aiDeploymentMode')
 const { parseInboundMedia } = require('../lib/inboundMedia')
 const { parseInboundReplyContext, aiReplyContext, matchingReplyMessage } = require('../lib/replyContext')
+const { attachmentDecision, fileForAttachment, snapshot } = require('../lib/contentLibraryAttachments')
 
 router.get('/', (req, res) => {
   const received = Buffer.from(String(req.query['hub.verify_token'] || ''))
@@ -249,6 +250,45 @@ async function outgoing(ctx, body) {
   return message
 }
 
+async function outgoingContentAttachment(ctx, attachment, source, caption = null) {
+  // Claim before contacting a provider. A webhook retry never creates another
+  // attachment attempt for the same inbound message and selected file.
+  const { data: delivery, error: claimError } = await supabase.from('content_library_attachment_deliveries').insert({
+    customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, conversation_id: ctx.conversation.id,
+    inbound_meta_message_id: ctx.metaId, content_library_item_id: attachment.id, source, status: 'pending'
+  }).select().maybeSingle()
+  if (claimError?.code === '23505') return null
+  if (claimError) throw claimError
+  try {
+    const prepared = await fileForAttachment(supabase, ctx.customerId, attachment)
+    const { mediaId, result } = await sendWorkspaceAttachment({
+      number: ctx.number, customerId: ctx.customerId, to: ctx.from,
+      attachment: { ...prepared.attachment, file: prepared.file, caption }
+    })
+    const now = new Date().toISOString()
+    const outboundMedia = { type: prepared.attachment.type, media_id: mediaId, mime_type: prepared.attachment.mime_type,
+      filename: prepared.attachment.filename, caption: caption || null, content_library_item_id: prepared.attachment.id,
+      content_library_storage_path: prepared.attachment.storage_path }
+    const { data: message, error: messageError } = await supabase.from('messages').insert({
+      customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, contact_id: ctx.contact.id, conversation_id: ctx.conversation.id,
+      direction: 'outbound', to_number: ctx.from, message_body: caption || null, status: result?.provider === 'gupshup' ? 'accepted' : 'sent',
+      meta_message_id: result?.messages?.[0]?.id || null, outbound_media: outboundMedia
+    }).select('id').single()
+    if (messageError) throw messageError
+    const { error: finalError } = await supabase.from('content_library_attachment_deliveries').update({
+      status: 'accepted', provider_media_id: mediaId, outbound_message_id: message.id, updated_at: now
+    }).eq('id', delivery.id).eq('customer_id', ctx.customerId).eq('status', 'pending')
+    if (finalError) throw finalError
+    await supabase.from('conversations').update({ last_message_at: now, last_outbound_at: now, updated_at: now })
+      .eq('id', ctx.conversation.id).eq('customer_id', ctx.customerId)
+    return message
+  } catch (error) {
+    await supabase.from('content_library_attachment_deliveries').update({ status: 'confirmation_required', error_category: 'attachment_send_failed', updated_at: new Date().toISOString() })
+      .eq('id', delivery.id).eq('customer_id', ctx.customerId).eq('status', 'pending')
+    throw error
+  }
+}
+
 async function workspaceAutomationSettings(customerId) {
   const { data, error } = await supabase.from('workspace_automation_settings')
     .select('timezone,business_hours').eq('customer_id', customerId).maybeSingle()
@@ -258,13 +298,16 @@ async function workspaceAutomationSettings(customerId) {
 
 async function responseBody(ctx, automation) {
   const action = automation.action_config || {}
-  if (action.kind !== 'content_library') return automation.message_template
+  if (action.kind !== 'content_library') return { body: automation.message_template, attachment:null }
   const { data: item, error } = await supabase.from('content_library_items')
-    .select('content_type,text_content,link_url').eq('id', automation.content_library_item_id)
+    .select('id,name,description,content_type,text_content,link_url,storage_path,original_file_name,mime_type,file_size,archived_at').eq('id', automation.content_library_item_id)
     .eq('customer_id', ctx.customerId).is('archived_at', null).maybeSingle()
   if (error) throw error
-  if (!item || !['TEXT', 'LINK'].includes(item.content_type)) throw new Error('Automation content is unavailable')
-  return item.content_type === 'TEXT' ? item.text_content : item.link_url
+  if (!item) throw new Error('Automation content is unavailable')
+  if (['TEXT', 'LINK'].includes(item.content_type)) return { body:item.content_type === 'TEXT' ? item.text_content : item.link_url, attachment:null }
+  const attachment = snapshot(item)
+  if (!attachment) throw new Error('Automation content is unavailable')
+  return { body:'', attachment }
 }
 
 async function handoffFromAutomation(ctx, automation) {
@@ -298,8 +341,11 @@ async function executeAutomation(ctx, automation) {
     await recordAutomationEvent(ctx, 'response_sent', 'success', { action_kind: 'start_chatbot_flow' }, automation.id)
     return
   }
-  const message = await outgoing(ctx, await responseBody(ctx, automation))
-  await recordAutomationEvent(ctx, 'response_sent', 'success', { action_kind: kind, content_type: action.kind === 'content_library' ? 'content_library' : 'written_text' }, automation.id)
+  const response = await responseBody(ctx, automation)
+  const message = response.attachment
+    ? await outgoingContentAttachment(ctx, response.attachment, 'automation')
+    : await outgoing(ctx, response.body)
+  await recordAutomationEvent(ctx, 'response_sent', 'success', { action_kind: kind, content_type: response.attachment ? response.attachment.type : action.kind === 'content_library' ? 'content_library' : 'written_text' }, automation.id)
   return message
 }
 
@@ -498,6 +544,18 @@ async function runLiveAiTurn(ctx, session, agent, version) {
     const reply = candidate
     if (!reply) throw new Error('AI response was empty')
     await outgoing(ctx, reply)
+    if (live.attachmentDecision?.kind === 'selected') {
+      try {
+        await outgoingContentAttachment(ctx, live.attachmentDecision.item, 'ai')
+      } catch (_) {
+        // The text reply remains valid. The durable delivery claim prevents a
+        // webhook retry from silently creating a duplicate attachment send.
+        await recordAiExecutionEvent(supabase, {
+          customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
+          agentVersion: session.agent_version, model: completion.model, outcome: 'failed', executionMode: 'live', errorCategory: 'attachment_send_failed'
+        }).catch(() => {})
+      }
+    }
     const nextHistory = boundedHistory([...history, { role: 'assistant', content: reply }])
     await updateLiveSession(ctx, session, { messages:nextHistory })
     await recordAiExecutionEvent(supabase, {

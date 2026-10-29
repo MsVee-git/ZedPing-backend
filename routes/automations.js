@@ -41,10 +41,13 @@ function leadCapture(value) {
 }
 
 async function assertContent(customerId, contentId) {
-  const { data, error } = await supabase.from('content_library_items').select('id,content_type,archived_at')
+  const { data, error } = await supabase.from('content_library_items').select('id,content_type,mime_type,archived_at')
     .eq('id', contentId).eq('customer_id', customerId).maybeSingle()
   if (error) throw error
-  if (!data || data.archived_at || !['TEXT', 'LINK'].includes(data.content_type)) throw new Error('Select active Text or Link content from this workspace')
+  if (!data || data.archived_at) throw new Error('Select active Text, Link, Image, or PDF content from this workspace')
+  const shareableFile = (data.content_type === 'IMAGE' && ['image/jpeg','image/png','image/webp'].includes(data.mime_type)) ||
+    (data.content_type === 'DOCUMENT' && data.mime_type === 'application/pdf')
+  if (!(['TEXT', 'LINK'].includes(data.content_type) || shareableFile)) throw new Error('Select active Text, Link, Image, or PDF content from this workspace')
   return data
 }
 
