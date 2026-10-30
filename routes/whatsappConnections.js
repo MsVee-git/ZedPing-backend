@@ -294,12 +294,21 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
       if (conflict.record && !existingMapping && !samePendingSignup) {
         return res.status(409).json({ error: 'An existing connection requires the guided Gupshup migration process' })
       }
-      const mapping = await store.ensure({ customerId: req.workspace.customerId, connectionId: connection.id, walletId: gupshupConfig.walletId })
+      const { data: workspace, error: workspaceError } = await supabase.from('customers')
+        .select('business_name').eq('id', req.workspace.customerId).maybeSingle()
+      if (workspaceError || !workspace?.business_name) throw new Error('Unable to prepare Gupshup app name')
+      const mapping = await store.ensure({
+        customerId: req.workspace.customerId,
+        connectionId: connection.id,
+        walletId: gupshupConfig.walletId,
+        businessName: workspace.business_name
+      })
       const result = await linkVerifiedConnection({
         customerId: req.workspace.customerId,
         connection: { ...connection, provider: 'gupshup',
           phone_number: validated.displayPhoneNumber.replace(/[^0-9]/g, ''),
           gupshup_app_id: mapping.app_id },
+        appName: mapping.app_name,
         walletId: gupshupConfig.walletId, callbackUrl: gupshupConfig.callbackUrl,
         store, partner: createGupshupPartnerClient(gupshupConfig)
       })
@@ -512,3 +521,4 @@ module.exports.loadOrExchangeSignupToken = loadOrExchangeSignupToken
 module.exports.recoveryAction = recoveryAction
 module.exports.runProvisioningClaim = runProvisioningClaim
 module.exports.failedProvisioningState = failedProvisioningState
+
