@@ -289,6 +289,8 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
     }
 
     if (gupshupConfig) {
+      completionStage = 'credential_storage'
+      await vault.put({ customerId: req.workspace.customerId, integration: 'meta_whatsapp', credentialKey: `phone_${validated.phoneNumberId}`, plaintext: temporaryToken })
       completionStage = 'gupshup_app_link'
       const store = createGupshupConnectionStore(supabase)
       const existingMapping = await store.load({ customerId: req.workspace.customerId, connectionId: connection.id })
