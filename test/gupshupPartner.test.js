@@ -139,3 +139,14 @@ test('subscription recovery reuses a complete subscription and updates only the 
  assert.deepEqual(await client.ensureSubscription('app1',options),{subscriptionId:'sub1'});assert.equal(writes,0);complete=false;await client.ensureSubscription('app1',options);assert.equal(writes,1);
  await assert.rejects(client.ensureSubscription('app1',{...options,callbackUrl:'http://private'}),/subscription_validation/)
 })
+
+test('onboarding accepts status/data envelopes without weakening activation checks', async () => {
+ const diagnostics=[];
+ const client=createGupshupPartnerClient({universalToken:'private',diagnostic:r=>diagnostics.push(r),fetchImpl:async url=>{
+  if(url.endsWith('/tpp/app'))return ok({status:'success',data:{appId:'app-123'}})
+  return ok({status:'success',data:{whatsapp:{creationStage:'WHATSAPP_PROVISIONING_DONE',whatsappVerificationStatus:'WHATSAPP_VERIFICATION_DONE'}}})
+ }});
+ assert.deepEqual(await client.linkApp({name:'ZedPingExample',wabaId:'123456',phone:'260700000001',walletId:'346146'}),{appId:'app-123'});
+ assert.equal((await client.getAppStatus('app-123')).provisioned,true);
+ assert.ok(!JSON.stringify(diagnostics).includes('private'));
+});

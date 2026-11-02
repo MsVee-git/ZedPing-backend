@@ -70,6 +70,14 @@ const stopGupshupWorker = require('./lib/gupshupWorkerLoop').startGupshupWorkerL
 })
 process.once('SIGTERM', stopGupshupWorker)
 process.once('SIGINT', stopGupshupWorker)
+const stopGupshupActivation = require('./lib/gupshupWorkerLoop').startGupshupWorkerLoop({
+ enabled: process.env.GUPSHUP_WORKER_ENABLED === 'true' && process.env.GUPSHUP_ROUTING_ENABLED === 'true',
+ intervalMs: 30000,
+ run: () => require('./lib/gupshupActivationWorker').reconcilePendingGupshupConnections({db:require('./lib/supabase')}),
+ onError: () => console.error('Gupshup activation check failed')
+})
+process.once('SIGTERM', stopGupshupActivation)
+process.once('SIGINT', stopGupshupActivation)
 const stopLeadNotifications = require('./lib/landingLeadNotifications').startLeadNotifications({ db: require('./lib/supabase'), onError: message => console.error(message) })
 process.once('SIGTERM', stopLeadNotifications)
 process.once('SIGINT', stopLeadNotifications)
