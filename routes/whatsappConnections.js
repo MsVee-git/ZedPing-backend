@@ -9,6 +9,7 @@ const { createGupshupPartnerClient } = require('../lib/gupshupPartner')
 const { createGupshupConnectionStore } = require('../lib/gupshupConnectionStore')
 const { linkVerifiedConnection } = require('../lib/gupshupOnboarding')
 const { gupshupConfigForCustomer } = require('../lib/gupshupConfig')
+const { publicEmbeddedSignupConfiguration } = require('../lib/embeddedSignupConfiguration')
 
 const SESSION_TTL_MINUTES = 15
 const PHONE_NUMBER_ID_PATTERN = /^[0-9]{5,32}$/
@@ -159,6 +160,7 @@ router.post('/embedded-signup/prepare', requireAdmin, async (req, res) => {
   if (!req.workspace.emailVerified) return res.status(403).json({ error: 'Verify your email before connecting WhatsApp' })
   try {
     const gupshupConfig = gupshupConfigForCustomer(req.workspace.customerId)
+    const publicConfig = publicEmbeddedSignupConfiguration()
     const state = crypto.randomBytes(32).toString('base64url')
     const expiresAt = new Date(Date.now() + SESSION_TTL_MINUTES * 60 * 1000).toISOString()
     const { data, error } = await supabase
@@ -173,7 +175,7 @@ router.post('/embedded-signup/prepare', requireAdmin, async (req, res) => {
       .select('id, expires_at')
       .single()
     if (error) throw error
-    return res.status(201).json({ session_id: data.id, state, expires_at: data.expires_at,
+    return res.status(201).json({ session_id: data.id, state, expires_at: data.expires_at, ...publicConfig,
       ...(gupshupConfig ? { provider: 'gupshup', solution_id: gupshupConfig.solutionId } : {}) })
   } catch (_) {
     return res.status(500).json({ error: 'Unable to prepare WhatsApp connection' })

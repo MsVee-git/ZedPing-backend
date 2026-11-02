@@ -11,6 +11,7 @@ Existing Meta-connected numbers retain their current provider. Enabling producti
 Server-only credentials and configuration:
 
 - `GUPSHUP_PARTNER_EMAIL`, `GUPSHUP_PARTNER_SECRET`; the configured Universal Token can be used instead of legacy partner/app token retrieval.
+- `META_APP_ID` must match dashboard `VITE_META_APP_ID`. Set `META_EMBEDDED_SIGNUP_CONFIG_ID` (or the existing `config_id` alias) to match dashboard `VITE_META_EMBEDDED_SIGNUP_CONFIG_ID`. Prepare returns only these public IDs; the browser rejects mismatched deployments before launching Meta. The chosen configuration must belong to that app and its approved joint solution.
 - `GUPSHUP_SOLUTION_ID`, `GUPSHUP_WALLET_ID`, `GUPSHUP_CALLBACK_URL`.
 - `GUPSHUP_WEBHOOK_SECRET`: at least 32 characters, sent as a subscription header and checked on receipt.
 - `GUPSHUP_ONBOARDING_ENABLED=true` enables partner signup.
@@ -22,7 +23,7 @@ Do not disable provider routing as a shortcut to returning migrated numbers to M
 ## Completion and recovery
 
 1. An owner/admin prepares a signed, workspace/user-bound signup session.
-2. The browser includes the approved Joint Solution ID in Meta's signup options and captures the selected phone ID and WABA ID. Meta callback events and the OAuth code can arrive in either order.
+2. The browser uses the guide's partner launch options: `response_type: 'code'`, `override_default_response_type: true`, and `extras: { setup: { solutionID }, featureType: '', sessionInfoVersion: '3' }`. The direct Meta `extras.version` option is not mixed into this launch. It captures the selected phone ID and WABA ID. Meta callback events and the OAuth code can arrive in either order.
 3. The backend exchanges the one-use code and keeps the resulting credential in the server-only vault. Phone/WABA ownership is verified independently of browser-provided IDs.
 4. A scoped connection and provider mapping are created. App linking is atomically claimed and uses a deterministic app name. An uncertain creation result requires confirmation rather than another app creation.
 5. Gupshup performs phone registration. This branch never calls Meta's direct registration endpoint.
@@ -49,7 +50,16 @@ ZedPing support: **+260 778 621 168**. Website and dashboard support, renewal an
 The automated suite exercises the real application handlers/runtime with external database, credential and messaging IO replaced by controlled fixtures. It covers workspace isolation, opt-outs, credential handling, receipt persistence, delayed activation and lost-response recovery. Browser acceptance covers both callback orders, pending partner activation and page-reload recovery. These checks do not represent a new customer's real Meta authorisation or a provider-side migration.
 
 Provider references:
+- https://bizgate-docs.gupshup.io/docs/tech-partner-hosted-embed-sign-up-flow (current location of the hosted-signup guide)
 - https://partner-docs.gupshup.io/docs/tech-partner-hosted-embed-sign-up-flow
 - https://partner-docs.gupshup.io/reference/setsubscription-api-v3
 - https://partner-docs.gupshup.io/reference/get_partner-app-appid-subscription
 - https://partner-docs.gupshup.io/reference/put_partner-app-appid-subscription-subscriptionid
+
+## Diagnosing a failure inside the Meta popup
+
+"Couldn't share WhatsApp account with partners" occurs before ZedPing receives the completed signup and before `/partner/tpp/app` can run. App-linking code cannot repair that failed authorization. First compare the launch App ID, Configuration ID and Solution ID with Meta's approved joint solution and its partner businesses. Active app status alone does not establish that these identifiers belong to the same joint solution. Preserve the error reference for provider support if the configured solution is correct.
+
+The guide above documents the existing `/partner/tpp/app` form API. The newer Bizgate reference also lists `/partner/bizgate/partner/{partnerId}/tpp/app`, a different JSON contract requiring partnerId and walletName. Do not silently switch existing accounts to it or substitute wallet ID for walletName. This release retains the existing API family used by ZedPing's integration.
+
+Automated browser checks use a simulated Meta SDK/provider response. A fresh authorized signup with a real number remains necessary to establish that partner sharing, app creation and live incoming/outgoing messaging work together.

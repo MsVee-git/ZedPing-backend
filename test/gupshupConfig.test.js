@@ -18,3 +18,12 @@ test('production onboarding permits paid client setup while explicit switches st
  assert.equal(gupshupConfigForCustomer('new-client',{...production,GUPSHUP_ONBOARDING_ENABLED:'false'}),null)
  assert.equal(gupshupConfigForCustomer('new-client',{...production,GUPSHUP_ROUTING_ENABLED:'false'},'messaging'),null)
 })
+
+test('a Universal Token is sufficient without disabled legacy login credentials', () => {
+ const config = gupshupConfigForCustomer('test-workspace', { ...env, GUPSHUP_PARTNER_EMAIL: '', GUPSHUP_PARTNER_SECRET: '', GUPSHUP_UNIVERSAL_TOKEN: ' universal ' })
+ assert.equal(config.universalToken, 'universal')
+ assert.equal(config.email, undefined)
+ assert.equal(config.secret, undefined)
+ assert.throws(() => gupshupConfigForCustomer('test-workspace', { ...env, GUPSHUP_PARTNER_SECRET: '', GUPSHUP_UNIVERSAL_TOKEN: ' ' }), /incomplete/)
+ assert.throws(() => gupshupConfigForCustomer('test-workspace', { ...env, GUPSHUP_CALLBACK_URL: 'https://example.com/#fragment' }), /invalid/)
+})
