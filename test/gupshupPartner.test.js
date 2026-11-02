@@ -150,3 +150,14 @@ test('onboarding accepts status/data envelopes without weakening activation chec
  assert.equal((await client.getAppStatus('app-123')).provisioned,true);
  assert.ok(!JSON.stringify(diagnostics).includes('private'));
 });
+
+test('a stale pipeline can recover only through the exact live healthy app and phone', async () => {
+ for(const variant of ['ready','wrong-phone','wrong-app','stopped','unhealthy']) {
+  const client=createGupshupPartnerClient({universalToken:'private',diagnostic:()=>{},fetchImpl:async url=>{
+   if(url.endsWith('/pipeline'))return ok({status:'success',whatsapp:{creationStage:'INITIAL',whatsappVerificationStatus:'NONE'}})
+   if(url.endsWith('/details'))return ok({status:'success',data:{id:variant==='wrong-app'?'other':'app-123',phone:variant==='wrong-phone'?'260700000002':'260700000001',live:true,stopped:variant==='stopped'}})
+   return ok({status:'success',data:{healthy:variant!=='unhealthy'}})
+  }});
+  assert.equal((await client.getAppStatus('app-123',{expectedPhone:'+260 700000001'})).provisioned,variant==='ready');
+ }
+});
