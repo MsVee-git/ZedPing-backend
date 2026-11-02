@@ -82,6 +82,7 @@ if (process.env.GUPSHUP_ROUTING_ENABLED === 'true') {
  require('./lib/signupManagementCredential').repairConnectedTemplateCredentials({
   db:require('./lib/supabase'),resolveToken:require('./lib/whatsappCredentials').resolveWhatsAppAccessToken,
   createMeta:require('./lib/metaTemplates').createMetaTemplateClient,
+  checkRegistration:(phoneId,token)=>require('./lib/metaEmbeddedSignup').createMetaEmbeddedSignupClient().getRegistrationStatus(phoneId,token),
   diagnostic:record=>console.info(JSON.stringify(record))
  }).catch(()=>console.error('Template access verification failed'))
 }
