@@ -101,6 +101,11 @@ if (process.env.VERIFY_LIVE_KNOWLEDGE_CUSTOMER_ID) require('./lib/verifyLiveKnow
  db:require('./lib/supabase'),complete:require('./lib/openai').getAICompletion,
  customerId:process.env.VERIFY_LIVE_KNOWLEDGE_CUSTOMER_ID,diagnostic:record=>console.info(JSON.stringify(record))
 }).catch(()=>console.error('Live knowledge verification failed'))
+if (process.env.PREPARE_ROUTING_RECOVERY_CUSTOMER_ID) require('./lib/routingRecoveryTemplate').prepareRoutingRecoveryTemplate({
+ db:require('./lib/supabase'),customerId:process.env.PREPARE_ROUTING_RECOVERY_CUSTOMER_ID,
+ resolveToken:require('./lib/whatsappCredentials').resolveWhatsAppAccessToken,meta:require('./lib/metaTemplates').createMetaTemplateClient(),
+ diagnostic:record=>console.info(JSON.stringify(record))
+}).catch(()=>console.error('Routing recovery template preparation failed'))
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => {
   console.log(`ZedPing backend running on port ${PORT}`)

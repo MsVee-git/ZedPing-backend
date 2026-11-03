@@ -45,3 +45,22 @@ test('pre-Meta failure callbacks retain Gupshup ID and numeric error codes', () 
  assert.equal(events[0].payload.message_id,'gs1');assert.deepEqual(events[0].payload.error_codes,['1001']);
  v.statuses[0].gs_id='';assert.throws(()=>normalizeGupshupIncoming(p,mapping,number),/delivery event/);
 });
+
+test('template quick-reply postbacks and interactive selections reach automation as visible text',()=>{
+ for(const message of [
+  {type:'button',button:{text:'Continue',payload:'opaque-payload'}},
+  {type:'interactive',interactive:{type:'button_reply',button_reply:{title:'Continue',id:'opaque-id'}}},
+  {type:'interactive',interactive:{type:'list_reply',list_reply:{title:'Continue',id:'opaque-id'}}}
+ ]) {
+  const payload=callback();payload.entry[0].changes[0].value.messages[0]={id:'postback1',from:'260977123456',context:{id:'template1'},...message}
+  const event=normalizeGupshupIncoming(payload,mapping,number)[0]
+  assert.equal(event.payload.body,'Continue')
+  assert.equal(event.payload.reply_to_message_id,'template1')
+  assert.equal(event.event_key,'message:postback1')
+  assert.equal(event.payload.media,null)
+ }
+ const malformed=callback();malformed.entry[0].changes[0].value.messages[0]={id:'bad',from:'260977123456',type:'button',button:{payload:'not visible text'}}
+ assert.throws(()=>normalizeGupshupIncoming(malformed,mapping,number),/button reply/)
+ const wrong=callback();wrong.gs_app_id='another-app'
+ assert.throws(()=>normalizeGupshupIncoming(wrong,mapping,number),/mapping mismatch/)
+})
