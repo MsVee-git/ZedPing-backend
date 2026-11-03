@@ -1,3 +1,4 @@
+const {normalizeAdReferral,profileNameFor,adReferralContext}=require('../lib/whatsappAdReferral')
 const { sendWorkspaceText, sendWorkspaceAttachment } = require('../lib/whatsappRuntime')
 const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
 const { persistMetaDeliveryPayload } = require('../lib/deliveryReceipts')
@@ -58,7 +59,7 @@ router.post('/', async (req, res) => {
       if (value.messages?.length) console.info(JSON.stringify({event:'whatsapp_inbound_path',source:'meta',field:'messages',connection_id:number.id,count:value.messages.length}))
       for (const incoming of value.messages || []) {
         const parsed = parseInboundMedia(incoming)
-        await processMessage({ customerId: number.customer_id, number, from: incoming.from, body: parsed.body, media: parsed.media, metaId: incoming.id, replyContextMetaId: parseInboundReplyContext(incoming) })
+        await processMessage({ customerId: number.customer_id, number, from: incoming.from, body: parsed.body, media: parsed.media, adReferral:normalizeAdReferral(incoming.referral),profileName:profileNameFor(value,incoming.from), metaId: incoming.id, replyContextMetaId: parseInboundReplyContext(incoming) })
       }
     }
   } catch (error) {
@@ -80,7 +81,7 @@ async function findOrCreateContact(ctx) {
   }
   if (!contact) {
     const { data, error: insertError } = await supabase.from('contacts').insert({
-      customer_id: ctx.customerId, name: '', phone_number: canonical || ctx.from,
+      customer_id: ctx.customerId, name: ctx.profileName || '', phone_number: canonical || ctx.from,
       phone_e164: canonical, source: 'whatsapp', custom_fields: {}
     }).select().single()
     if (insertError) throw insertError
@@ -174,6 +175,7 @@ async function persistInbound(ctx, contact, conversation) {
     to_number: ctx.number.phone_number,
     message_body: ctx.body,
     inbound_media: ctx.media,
+    ad_referral:ctx.adReferral || null,
     reply_to_message_id: replyTo?.id || null,
     reply_context_meta_id: ctx.replyContextMetaId || null,
     status: 'received',
@@ -502,7 +504,8 @@ async function updateLiveSession(ctx, session, { messages, commercialContext }) 
 
 async function runLiveAiTurn(ctx, session, agent, version) {
   const quotedContext = aiReplyContext(ctx.replyToMessage)
-  const customerTurn = quotedContext ? `${quotedContext}\n\nCustomer message:\n${ctx.body}` : ctx.body
+  const adContext=adReferralContext(ctx.adReferral)
+  const customerTurn = adContext || quotedContext ? [adContext,quotedContext,`Customer message:\n${ctx.body}`].filter(Boolean).join('\n\n') : ctx.body
   const live = buildLiveSystem(agent, version, customerTurn)
   let handoffStarted = false
   const handoff = async (reason, reply, commercialContext = null) => {

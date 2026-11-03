@@ -1,3 +1,4 @@
+const {normalizeAdReferral}=require('../lib/whatsappAdReferral')
 const { loadOutboundHistory, mergeOutboundHistory } = require('../lib/inboxOutboundHistory')
 const { sendWorkspaceText, sendWorkspaceAttachment } = require('../lib/whatsappRuntime')
 const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
@@ -203,7 +204,7 @@ router.get('/:id', async (req, res) => {
     }
     stage = 'normal_messages_query'
     const { data: messages, error } = await supabase.from('messages')
-      .select('id,direction,to_number,from_number,message_body,status,created_at,meta_message_id,inbound_media,outbound_media,reply_to_message_id')
+      .select('id,direction,to_number,from_number,message_body,status,created_at,meta_message_id,inbound_media,outbound_media,reply_to_message_id,ad_referral')
       .eq('customer_id', req.workspace.customerId)
       .eq('whatsapp_number_id', conversation.whatsapp_number_id)
       .eq('conversation_id', conversation.id)
@@ -224,7 +225,7 @@ router.get('/:id', async (req, res) => {
     }
     stage = 'outbound_contact_history'
     const outboundHistory = await loadOutboundHistory(supabase, req.workspace.customerId, conversation)
-    const publicMessages = mergeOutboundHistory(messages, outboundHistory).map(({ inbound_media, outbound_media, reply_to_message_id, ...message }) => {
+    const publicMessages = mergeOutboundHistory(messages, outboundHistory).map(({ inbound_media, outbound_media, reply_to_message_id, ad_referral, ...message }) => {
       let publicInbound, publicOutbound
       try {
         publicInbound = publicInboundMedia(inbound_media)
@@ -240,7 +241,10 @@ router.get('/:id', async (req, res) => {
         stage = 'reply_preview_construction'
         throw error
       }
-      return { ...message, inbound_media: publicInbound, outbound_media: publicOutbound, reply_to: replyTo }
+      const referral=normalizeAdReferral(ad_referral)
+      // The click identifier is server-only attribution data.
+      if(referral) delete referral.ctwa_clid
+      return { ...message, ad_referral:referral, inbound_media: publicInbound, outbound_media: publicOutbound, reply_to: replyTo }
     })
     stage = 'final_response_construction'
     return res.json({ conversation, messages: publicMessages })
