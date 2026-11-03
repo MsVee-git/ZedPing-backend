@@ -79,6 +79,10 @@ const stopGupshupActivation = require('./lib/gupshupWorkerLoop').startGupshupWor
 process.once('SIGTERM', stopGupshupActivation)
 process.once('SIGINT', stopGupshupActivation)
 if (process.env.GUPSHUP_ROUTING_ENABLED === 'true') {
+ if (process.env.WHATSAPP_THREAD_REPAIR_MESSAGE_ID) require('./lib/whatsappThreadRepair').repairFailedThread({
+  db:require('./lib/supabase'),resolveToken:require('./lib/whatsappCredentials').resolveWhatsAppAccessToken,
+  messageId:process.env.WHATSAPP_THREAD_REPAIR_MESSAGE_ID,diagnostic:record=>console.info(JSON.stringify(record))
+ }).catch(()=>console.error('WhatsApp thread repair evidence check failed'))
  require('./lib/whatsappRoutingDiagnostics').inspectConnectedRouting({
   db:require('./lib/supabase'),resolveToken:require('./lib/whatsappCredentials').resolveWhatsAppAccessToken,
   diagnostic:record=>console.info(JSON.stringify(record))
