@@ -40,6 +40,8 @@ function createGupshupWebhookRouter({ db, webhookSecret }) {
         await persistDeliveryStatuses(db,statuses,result.data,'gupshup');
       }
       await persistGupshupEvents(db, mapping, events)
+      const count = events.filter(event=>event.event_type==='message').length
+      if (count) console.info(JSON.stringify({event:'whatsapp_inbound_path',source:'gupshup',field:'messages',connection_id:result.data.id,count}))
       return res.status(200).end()
     } catch {
       // Non-2xx lets Gupshup retry; do not acknowledge lost events.

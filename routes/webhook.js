@@ -47,12 +47,15 @@ router.post('/', async (req, res) => {
   res.sendStatus(200)
   try {
     for (const entry of req.body.entry || []) for (const change of entry.changes || []) {
+      // Standby is passive visibility, not permission to start an AI reply.
+      if (!require('../lib/whatsappRoutingDiagnostics').metaMessageChange(change)) continue
       const value = change.value || {}
       const phoneNumberId = value.metadata?.phone_number_id
       if (!phoneNumberId) continue
       const { data: number } = await supabase.from('whatsapp_numbers').select('*')
         .eq('phone_number_id', phoneNumberId).eq('status', 'connected').maybeSingle()
       if (!number) continue
+      if (value.messages?.length) console.info(JSON.stringify({event:'whatsapp_inbound_path',source:'meta',field:'messages',connection_id:number.id,count:value.messages.length}))
       for (const incoming of value.messages || []) {
         const parsed = parseInboundMedia(incoming)
         await processMessage({ customerId: number.customer_id, number, from: incoming.from, body: parsed.body, media: parsed.media, metaId: incoming.id, replyContextMetaId: parseInboundReplyContext(incoming) })

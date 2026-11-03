@@ -79,6 +79,10 @@ const stopGupshupActivation = require('./lib/gupshupWorkerLoop').startGupshupWor
 process.once('SIGTERM', stopGupshupActivation)
 process.once('SIGINT', stopGupshupActivation)
 if (process.env.GUPSHUP_ROUTING_ENABLED === 'true') {
+ require('./lib/whatsappRoutingDiagnostics').inspectConnectedRouting({
+  db:require('./lib/supabase'),resolveToken:require('./lib/whatsappCredentials').resolveWhatsAppAccessToken,
+  diagnostic:record=>console.info(JSON.stringify(record))
+ }).catch(()=>console.error('WhatsApp routing inspection failed'))
  require('./lib/signupManagementCredential').repairConnectedTemplateCredentials({
   db:require('./lib/supabase'),resolveToken:require('./lib/whatsappCredentials').resolveWhatsAppAccessToken,
   createMeta:require('./lib/metaTemplates').createMetaTemplateClient,
