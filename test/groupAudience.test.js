@@ -1,6 +1,6 @@
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const { loadGroupLinks, loadWorkspaceContacts } = require('../lib/groupAudience')
+const { loadGroupLinks, loadWorkspaceContacts, loadAllWorkspaceContacts } = require('../lib/groupAudience')
 
 function database({ links = [], failAt = -1 } = {}) {
   const calls = []
@@ -44,4 +44,16 @@ test('empty and duplicate IDs do not create duplicate contact requests', async()
 test('failed batches reject the whole audience rather than returning a partial result', async()=>{
   const db=database({failAt:2})
   await assert.rejects(()=>loadWorkspaceContacts(db,'a',Array.from({length:100},(_,i)=>String(i)),'id'),/database unavailable/)
+})
+
+test('all-contact audiences are fully paginated and always workspace scoped', async()=>{
+  const rows=Array.from({length:501},(_,i)=>({id:String(i)}))
+  const calls=[]
+  const db={from(table){ const call={table}; calls.push(call); const query={
+    select(columns){call.columns=columns;return this}, eq(key,value){(call.filters||={})[key]=value;return this},
+    order(key){call.order=key;return this}, async range(first,last){call.range=[first,last];return {data:rows.slice(first,last+1)}}
+  }; return query }}
+  assert.deepEqual(await loadAllWorkspaceContacts(db,'workspace-a','id,name'),rows)
+  assert.equal(calls.length,2)
+  assert.ok(calls.every(call=>call.table==='contacts' && call.filters.customer_id==='workspace-a' && call.order==='id'))
 })

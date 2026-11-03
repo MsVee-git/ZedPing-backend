@@ -1,4 +1,4 @@
-const { loadGroupLinks, loadWorkspaceContacts } = require('../lib/groupAudience')
+const { loadGroupLinks, loadWorkspaceContacts, loadAllWorkspaceContacts } = require('../lib/groupAudience')
 const { initialDelivery, addDelivery } = require('../lib/deliveryMetrics')
 const { sendWorkspaceText, sendWorkspaceTemplate, uploadWorkspaceMedia } = require('../lib/whatsappRuntime')
 const multer = require('multer')
@@ -86,6 +86,25 @@ async function audienceForGroup(workspace, groupId) {
   return { group, recipients: dedupeRecipients(contacts || []) }
 }
 
+async function audienceForAllContacts(workspace) {
+  const contacts = await loadAllWorkspaceContacts(supabase, workspace,
+    'id,name,phone_number,email,custom_fields,marketing_opted_out')
+  return {
+    audience: { type: 'all_contacts', name: 'All contacts' },
+    recipients: dedupeRecipients(contacts || [])
+  }
+}
+
+async function broadcastAudience(workspace, body) {
+  if (body?.audience_type === 'all_contacts') return audienceForAllContacts(workspace)
+  const groupAudience = await audienceForGroup(workspace, body?.contact_group_id)
+  if (groupAudience.error) return groupAudience
+  return {
+    audience: { type: 'contact_group', id: groupAudience.group.id, name: groupAudience.group.name },
+    recipients: groupAudience.recipients
+  }
+}
+
 function fail(res, error) {
   console.error('Broadcast preparation failed', { code: error?.code || null, type: error?.name || 'Error' })
   if (res.headersSent) return
@@ -96,7 +115,7 @@ function fail(res, error) {
 async function templateReview(workspace, body) {
   const number = await numberFor(workspace, body?.whatsapp_number_id)
   if (!number) return { error: 'Choose a connected WhatsApp number in the active workspace.', status: 404 }
-  const audience = await audienceForGroup(workspace, body?.contact_group_id)
+  const audience = await broadcastAudience(workspace, body)
   if (audience.error) return audience
   const catalog = await loadWorkspaceTemplates(workspace, number.id)
   if (catalog.kind !== 'ok') return { error: 'Templates are unavailable for this WhatsApp number.', status: 409 }
@@ -104,7 +123,7 @@ async function templateReview(workspace, body) {
   if (!template) return { error: 'This template is not available for the selected WhatsApp business.', status: 403 }
   const marketing = await filterWorkspaceMarketingRecipients(supabase, workspace, audience.recipients)
   const resolved = resolveTemplateRecipients(template, marketing.eligible, body?.variable_mappings)
-  return { number, group: audience.group, ...resolved, total_selected: audience.recipients.length, eligible_recipients: resolved.recipients.length, opted_out_recipients: marketing.optedOut.length, suppressed: marketing.optedOut.map(({ id, name, phone_number }) => ({ id, name, phone_number })), skipped_recipients: resolved.unresolved.length }
+  return { number, audience: audience.audience, ...resolved, total_selected: audience.recipients.length, eligible_recipients: resolved.recipients.length, opted_out_recipients: marketing.optedOut.length, suppressed: marketing.optedOut.map(({ id, name, phone_number }) => ({ id, name, phone_number })), skipped_recipients: resolved.unresolved.length }
 }
 
 router.get('/setup', requireAdmin, async (req, res) => {
@@ -132,7 +151,7 @@ router.post('/review-template', requireAdmin, async (req, res) => {
   try {
     const review = await templateReview(req.workspace.customerId, req.body || {})
     if (review.error) return res.status(review.status || 400).json({ error: review.error })
-    res.json({ sending_number: publicConnection(review.number), audience: { id: review.group.id, name: review.group.name }, template: review.template, variable_mappings: review.mappings, total_selected: review.total_selected, eligible_recipients: review.eligible_recipients, opted_out_recipients: review.opted_out_recipients, suppressed: review.suppressed, skipped_recipients: review.skipped_recipients, unresolved: review.unresolved.map((item) => ({ reason: item.reason })) })
+    res.json({ sending_number: publicConnection(review.number), audience: review.audience, template: review.template, variable_mappings: review.mappings, total_selected: review.total_selected, eligible_recipients: review.eligible_recipients, opted_out_recipients: review.opted_out_recipients, suppressed: review.suppressed, skipped_recipients: review.skipped_recipients, unresolved: review.unresolved.map((item) => ({ reason: item.reason })) })
   } catch (error) { fail(res, error) }
 })
 
