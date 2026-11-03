@@ -94,3 +94,13 @@ test('live handoff sends one confirmation before Team Inbox state and preserves 
   assert.ok(processBody.indexOf('shouldSuppressAutomation(conversation)') < processBody.indexOf('checkAISession(ctx)'))
 })
 
+
+test('AI product plan facts are public information and must not trigger the internal terminology rejection',()=>{
+ const plans='Starter: K1,200/month. Business: K2,500/month with one AI agent. Pro: K5,000/month with up to three AI agents.'
+ assert.equal(isCustomerSafeReply(plans),true)
+ assert.equal(isCustomerSafeReply('My approved knowledge says this needs escalation.'),false)
+ const live=buildLiveSystem({name:'Sales assistant'}, {configuration:{configuration:{handoff:{unknown:true}}},knowledge_snapshot:[{id:'plans',name:'Subscription plans',text_content:plans}]},'What are the subscription plans available?')
+ assert.ok(live.knowledge.some(item=>item.id==='plans'))
+ assert.ok(live.prompt.includes(plans))
+ assert.match(live.prompt,/AI agents are customer-facing product features/)
+})

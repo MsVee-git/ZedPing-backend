@@ -97,6 +97,10 @@ if (process.env.GUPSHUP_ROUTING_ENABLED === 'true') {
 const stopLeadNotifications = require('./lib/landingLeadNotifications').startLeadNotifications({ db: require('./lib/supabase'), onError: message => console.error(message) })
 process.once('SIGTERM', stopLeadNotifications)
 process.once('SIGINT', stopLeadNotifications)
+if (process.env.VERIFY_LIVE_KNOWLEDGE_CUSTOMER_ID) require('./lib/verifyLiveKnowledge').verifyLiveKnowledge({
+ db:require('./lib/supabase'),complete:require('./lib/openai').getAICompletion,
+ customerId:process.env.VERIFY_LIVE_KNOWLEDGE_CUSTOMER_ID,diagnostic:record=>console.info(JSON.stringify(record))
+}).catch(()=>console.error('Live knowledge verification failed'))
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => {
   console.log(`ZedPing backend running on port ${PORT}`)

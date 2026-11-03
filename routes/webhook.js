@@ -433,14 +433,14 @@ async function startLiveZoeSession(ctx) {
   return runLiveAiTurn(ctx, session, agent, version)
 }
 
-async function transitionAiToHandoff(ctx, session, agent, reason, commercialContext = null) {
+async function transitionAiToHandoff(ctx, session, agent, reason, commercialContext = null, retrievalItemIds = []) {
   const now = new Date().toISOString()
   await closeActiveAiSessionsForConversation({
     customerId: ctx.customerId,
     whatsappNumberId: ctx.number.id,
     conversationId: ctx.conversation.id,
     contactPhone: ctx.from,
-    reason: 'ai_' + reason
+    reason: 'ai_' + reason, retrievalItemIds
   })
   const { data, error } = await supabase.from('conversations').update({
     status: 'needs_attention',
@@ -472,7 +472,7 @@ async function businessNameForHandoff(ctx, agent) {
   return data?.business_name || agent?.name || 'business'
 }
 
-async function handoffLiveAi(ctx, session, agent, reason, reply, commercialContext = null) {
+async function handoffLiveAi(ctx, session, agent, reason, reply, commercialContext = null, retrievalItemIds = []) {
   const confirmation = handoffConfirmation(await businessNameForHandoff(ctx, agent), reason)
   const supportedReply = String(reply || '').trim()
   const customerMessage = supportedReply ? supportedReply + '\n\n' + confirmation : confirmation
@@ -480,7 +480,7 @@ async function handoffLiveAi(ctx, session, agent, reason, reply, commercialConte
   // has exactly one customer-visible final handoff message.  A delivery error is
   // allowed to stop processing rather than risking a duplicate confirmation.
   await outgoing(ctx, customerMessage)
-  await transitionAiToHandoff(ctx, session, agent, reason, commercialContext)
+  await transitionAiToHandoff(ctx, session, agent, reason, commercialContext, retrievalItemIds)
   return true
 }
 
@@ -507,7 +507,7 @@ async function runLiveAiTurn(ctx, session, agent, version) {
   let handoffStarted = false
   const handoff = async (reason, reply, commercialContext = null) => {
     handoffStarted = true
-    return handoffLiveAi(ctx, session, agent, reason, reply, commercialContext)
+    return handoffLiveAi(ctx, session, agent, reason, reply, commercialContext, live.knowledge.map(item => item.id))
   }
   const history = boundedHistory([...(session.messages || []), { role: 'user', content: customerTurn }])
   const commercial = commercialTurn(live.configuration, customerTurn, history.slice(0, -1), session.commercial_context)
