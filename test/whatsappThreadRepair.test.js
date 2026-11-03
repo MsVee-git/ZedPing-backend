@@ -22,3 +22,14 @@ test('an ambiguous timeout cannot be automatically retried',async()=>{
 test('operator repair is disabled without an explicit target',async()=>{
  await repairFailedThread({db:{from(){throw Error('no database calls allowed')}}})
 })
+test('releasing a legacy thread does not pass to an unsupported role or send messages',async()=>{
+ const result=await passToService({phone_number_id:'123456'},'PRIVATE','260978748066',{action:'release',fetchImpl:async(url,opts)=>{
+  assert.ok(url.endsWith('/thread_control'))
+  assert.deepEqual(JSON.parse(opts.body),{messaging_product:'whatsapp',to:'260978748066',action:'release'})
+  return {ok:true,json:async()=>({request_id:'release1'})}
+ }})
+ assert.deepEqual(result,{state:'released'})
+})
+test('operator cannot take control or target arbitrary actions',async()=>{
+ await assert.rejects(passToService({phone_number_id:'123456'},'PRIVATE','260978748066',{action:'take',fetchImpl:async()=>{throw Error('must not call')}}),/Invalid thread repair/)
+})
