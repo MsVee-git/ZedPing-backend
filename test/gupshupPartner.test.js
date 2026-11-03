@@ -161,3 +161,37 @@ test('a stale pipeline can recover only through the exact live healthy app and p
   assert.equal((await client.getAppStatus('app-123',{expectedPhone:'+260 700000001'})).provisioned,variant==='ready');
  }
 });
+
+test('Universal Token messaging uses documented Bizgate endpoint for text, media and utility',async()=>{
+ const calls=[]
+ const client=createGupshupPartnerClient({universalToken:'PRIVATE',diagnostic:()=>{},fetchImpl:async(url,options)=>{
+  calls.push({url,options});return ok({messages:[{id:'accepted'}]})
+ }})
+ await client.sendText('app1',{to:'260978748066',body:'Hello',replyToMessageId:'original'})
+ await client.sendMedia('app1',{to:'260978748066',type:'image',mediaId:'123456'})
+ await client.sendTemplate('app1',{to:'260978748066',template:{name:'notice',language:'en'},category:'UTILITY'})
+ assert.equal(calls.length,3)
+ for(const call of calls){
+  assert.equal(call.url,'https://partner.gupshup.io/partner/bizgate/app/app1/messaging')
+  assert.equal(call.options.headers.Authorization,'Bearer PRIVATE')
+ }
+ assert.equal(JSON.parse(calls[0].options.body).context.message_id,'original')
+})
+test('failed modern submission never retries through legacy or direct Meta',async()=>{
+ let calls=0
+ const client=createGupshupPartnerClient({universalToken:'PRIVATE',diagnostic:()=>{},fetchImpl:async()=>{calls++;return {ok:false,status:403}}})
+ await assert.rejects(client.sendText('app1',{to:'260978748066',body:'Hello'}),/text_message failed/)
+ assert.equal(calls,1)
+})
+test('connection identity reads never return tokens, callback URLs or response bodies',async()=>{
+ const calls=[]
+ const client=createGupshupPartnerClient({universalToken:'PRIVATE',diagnostic:()=>{},fetchImpl:async(url,options)=>{
+  calls.push({url,options});return ok({status:'success',data:{id:'app1',phone:'260978748066',live:true,callbackUrl:'PRIVATE_URL',accessToken:'PRIVATE_TOKEN',whatsapp:{wabaId:'1404260998010800',metaAppId:'340384197887925',token:'PRIVATE_TOKEN'}}})
+ }})
+ const result=await client.inspectConnectionIdentity('app1','+260978748066')
+ assert.equal(result.details.phone_matches,true)
+ assert.equal(result.details.identifiers.whatsapp.metaAppId,'340384197887925')
+ assert.ok(!JSON.stringify(result).includes('PRIVATE_'))
+ assert.ok(calls.every(call=>call.options.method==='GET' && call.options.body===undefined))
+ await assert.rejects(client.inspectConnectionIdentity('../other','260978748066'),/app_id_validation/)
+})
