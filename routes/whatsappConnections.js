@@ -413,6 +413,9 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
     return res.status(201).json({ connection: provisioningView(connection), idempotent: Boolean(conflict.record) })
   } catch (error) {
     emitCompletionFailure({ stage: completionStage, sessionId: completionSessionId, customerId: req.workspace.customerId, error })
+    if(completionStage==='gupshup_app_link' && error.code==='GUPSHUP_LINK_CONFIRMATION_REQUIRED') {
+      return res.status(202).json({provider:'gupshup',provisioning_state:'in_progress',linked:false})
+    }
     if (error instanceof MetaSignupError || error instanceof CredentialVaultError) return res.status(422).json({ error: 'Meta could not complete secure WhatsApp provisioning' })
     return res.status(500).json({ error: 'Unable to complete WhatsApp connection' })
   }
