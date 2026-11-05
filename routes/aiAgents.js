@@ -11,7 +11,7 @@ const { knowledgeSnapshot, draftDiffersFromActivated, resolveEligibleKnowledge }
 const { deploymentMode, isActiveAgent, mayGoLive, mayReturnToTest } = require('../lib/aiDeploymentMode')
 const { MAX_AGENT_ATTACHMENTS, resolveAttachments, publicAttachment } = require('../lib/contentLibraryAttachments')
 
-const MAX_KNOWLEDGE_ITEMS = 5
+const MAX_KNOWLEDGE_ITEMS = 10
 const MAX_KNOWLEDGE_ITEM_CHARS = 3000
 const MAX_KNOWLEDGE_CONTEXT_CHARS = 10000
 const MAX_TEST_MESSAGES = 12
