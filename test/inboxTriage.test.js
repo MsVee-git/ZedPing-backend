@@ -13,7 +13,7 @@ function fixture(extra=[]) {
   {id:id(6),customer_id:'b',status:'needs_attention',control_mode:'needs_attention',assigned_user_id:null,unread_count:1},
   ...extra
  ].map(row=>({updated_at:version,contacts:{name:'Synthetic'},...row}));
- const queries=[],events=[],cleanups=[];let race=false;
+ const rpcCalls=[];const queries=[],events=[],cleanups=[];let race=false;
  const db={from(table){
   const filters=[];let patch=null,single=false,head=false,start=0,end=Infinity,limit=Infinity;
   const log={table,filters};queries.push(log);
@@ -34,6 +34,7 @@ function fixture(extra=[]) {
    }
   };return q;
  }};
+ db.rpc=(name,args)=>{rpcCalls.push({name,args});const ids=rows.filter(row=>row.customer_id===args.p_customer_id && [row.contacts?.name,...(row.history||[])].some(text=>String(text||'').toLowerCase().includes(args.p_query.toLowerCase()))).map(row=>row.id);return db.from('conversations').in('id',ids);};
  const routes=new Map(),router={get(p,...h){routes.set('GET '+p,h)},post(p,...h){routes.set('POST '+p,h)},patch(p,...h){routes.set('PATCH '+p,h)}};
  const context={module:{exports:{}},require(name){
   if(name==='express')return {Router:()=>router};if(name==='../lib/supabase')return db;if(name==='../lib/inboxTriage')return triage;
@@ -46,7 +47,7 @@ function fixture(extra=[]) {
  }};
  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../routes/conversations.js'),'utf8'),context);
  const workspace={customerId:'a',role:'admin',userId:person};
- return {rows,queries,events,cleanups,workspace,race:()=>{race=true},async call(method,url,{body={},query={},role='admin',params={}}={}){
+ return {rows,rpcCalls,queries,events,cleanups,workspace,race:()=>{race=true},async call(method,url,{body={},query={},role='admin',params={}}={}){
   const result={status:200},res={status(code){result.status=code;return res},json(data){result.body=JSON.parse(JSON.stringify(data));return res}};
   const req={workspace:{...workspace,role},body,query,params};const handlers=routes.get(method+' '+url);let i=0;const next=()=>handlers[i++]?.(req,res,next);await next();return result;
  },bulk(body,role='admin'){return triage.runBulk({db,fields:'*',workspace:{...workspace,role},body,assertMember:async(w,u)=>{assert.equal(w,'a');if(![person,other].includes(u))throw Error('Foreign member')},recordEvent:async e=>events.push(e)})}};
@@ -101,4 +102,17 @@ test('bulk payload is bounded to 200 unique versioned selections',()=>{
  assert.doesNotThrow(()=>triage.validateBulk(body('resolve',Array.from({length:200},(_,i)=>i+1))));
  assert.throws(()=>triage.validateBulk(body('resolve',Array.from({length:201},(_,i)=>i+1))));
  assert.throws(()=>triage.validateBulk({action:'resolve',items:[{id:id(1)}]}));
+});
+
+test('keyword search finds old messages beyond the first page and keeps workspace and view boundaries',async()=>{
+ const extra=Array.from({length:65},(_,i)=>({id:id(200+i),customer_id:'a',status:'open',control_mode:'human',assigned_user_id:person,unread_count:0,history:['Older enquiry for a TONNEAU cover','Latest message says thanks']}));
+ extra.push({id:id(999),customer_id:'b',status:'open',control_mode:'human',assigned_user_id:person,history:['tonneau']});
+ const f=fixture(extra);
+ const first=await f.call('GET','/',{query:{view:'assigned_to_me',offset:'0',q:'tonneau'}});
+ assert.equal(first.status,200);assert.equal(first.body.conversations.length,50);assert.equal(first.body.next_offset,50);
+ assert.ok(first.body.conversations.every(row=>row.customer_id==='a'));
+ const second=await f.call('GET','/',{query:{view:'assigned_to_me',offset:'50',q:'tonneau'}});
+ assert.equal(second.body.conversations.length,15);assert.equal(second.body.next_offset,null);
+ const unmatched=await f.call('GET','/',{query:{view:'unread',offset:'0',q:'tonneau'}});assert.equal(unmatched.body.conversations.length,0);
+ const invalid=await f.call('GET','/',{query:{q:'x'}});assert.equal(invalid.status,400);
 });

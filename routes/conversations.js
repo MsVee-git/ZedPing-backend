@@ -166,10 +166,13 @@ router.get('/', async (req, res) => {
   try {
     const view = String(req.query.view || 'all')
     if (!VIEWS.includes(view)) return res.status(400).json({ error: 'Conversation view is invalid' })
+    const search = String(req.query.q || '').trim()
+    if (search && (search.length < 2 || search.length > 120)) return res.status(400).json({ error: 'Search must be between 2 and 120 characters' })
     const paged = req.query.offset !== undefined
     const offset = Number(req.query.offset || 0), size = paged ? 50 : 100
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100000) return res.status(400).json({ error: 'Invalid conversation page' })
-    let query = applyView(supabase.from('conversations')
+    const source = search ? supabase.rpc('search_inbox_conversations', { p_customer_id: req.workspace.customerId, p_query: search }) : supabase.from('conversations')
+    let query = applyView(source
       .select(CONVERSATION_FIELDS + ',messages(message_body,direction,status,created_at)')
       .eq('customer_id', req.workspace.customerId)
       .eq('messages.customer_id', req.workspace.customerId)
