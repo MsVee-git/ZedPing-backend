@@ -114,6 +114,15 @@ const stopCampaignScheduler = require('./lib/gupshupWorkerLoop').startGupshupWor
 })
 process.once('SIGTERM',stopCampaignScheduler)
 process.once('SIGINT',stopCampaignScheduler)
+const stopLeadFollowups = require('./lib/gupshupWorkerLoop').startGupshupWorkerLoop({
+ enabled:process.env.AI_LEAD_FOLLOWUPS_ENABLED === 'true',intervalMs:30000,
+ run:()=>require('./lib/leadFollowups').runLeadFollowups({db:require('./lib/supabase'),complete:require('./lib/openai').getAICompletion,
+ sendText:require('./lib/whatsappRuntime').sendWorkspaceText,sendTemplate:require('./lib/whatsappRuntime').sendWorkspaceTemplate,
+ listTemplates:async(number,customerId)=>require('./lib/metaTemplates').createMetaTemplateClient().listTemplates({wabaId:number.whatsapp_business_account_id,accessToken:await require('./lib/whatsappCredentials').resolveWhatsAppAccessToken(number,{customerId})})}),
+ onError:()=>console.error('Lead follow-up batch failed')
+})
+process.once('SIGTERM',stopLeadFollowups)
+process.once('SIGINT',stopLeadFollowups)
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => {
   console.log(`ZedPing backend running on port ${PORT}`)

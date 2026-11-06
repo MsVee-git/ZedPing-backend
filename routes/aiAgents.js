@@ -1,3 +1,4 @@
+const { normalizeFollowups, eligibleTemplate } = require('../lib/leadFollowupPolicy')
 const express = require('express')
 const router = express.Router()
 const supabase = require('../lib/supabase')
@@ -120,8 +121,15 @@ async function readConfig(body, customerId) {
   const commercialAction = normaliseCommercialAction(body?.commercial_action)
   const attachmentIds = Array.isArray(body?.shareable_content_item_ids) ? body.shareable_content_item_ids : []
   const attachments = await resolveAttachments(supabase, customerId, attachmentIds)
+  const followups = normalizeFollowups(body?.followups)
+  if (followups.enabled) {
+    const {data:number,error} = await supabase.from('whatsapp_numbers').select('*').eq('customer_id',customerId).eq('id',body.whatsapp_number_id).eq('status','connected').maybeSingle()
+    if(error || !number) throw new Error('Select a connected WhatsApp number for follow-ups')
+    const list = await require('../lib/metaTemplates').createMetaTemplateClient().listTemplates({wabaId:number.whatsapp_business_account_id,accessToken:await require('../lib/whatsappCredentials').resolveWhatsAppAccessToken(number,{customerId})})
+    for(const id of [followups.template_24h_id,followups.template_72h_id]) if(!eligibleTemplate(list.find(item=>String(item.id)===id))) throw new Error('Select approved marketing templates with body text only and no variables for follow-ups')
+  }
   return { template, name, agentType:TYPES.has(body?.agent_type) ? body.agent_type : (template.key === 'sales_interest' ? 'sales' : template.key === 'static_availability' ? 'booking' : 'support'),
-    configuration:{ communication_style:style, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases }, ...(commercialAction ? { commercial_action:commercialAction } : {}), shareable_content_item_ids:attachments.map(item => item.id), shareable_attachments:attachments, knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
+    configuration:{ followups, communication_style:style, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases }, ...(commercialAction ? { commercial_action:commercialAction } : {}), shareable_content_item_ids:attachments.map(item => item.id), shareable_attachments:attachments, knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
 }
 function buildSystem(agent, knowledge, question, history = []) {
   return buildLiveSystem(agent, { configuration:activatedConfiguration(agent), knowledge_snapshot:knowledgeSnapshot(knowledge) }, question, history).prompt
