@@ -106,6 +106,14 @@ if (process.env.PREPARE_ROUTING_RECOVERY_CUSTOMER_ID) require('./lib/routingReco
  resolveToken:require('./lib/whatsappCredentials').resolveWhatsAppAccessToken,meta:require('./lib/metaTemplates').createMetaTemplateClient(),
  diagnostic:record=>console.info(JSON.stringify(record))
 }).catch(()=>console.error('Routing recovery template preparation failed'))
+let campaignSchedulerReady=false
+const stopCampaignScheduler = require('./lib/gupshupWorkerLoop').startGupshupWorkerLoop({
+ enabled:true, intervalMs:15000,
+ run:async()=>{await require('./lib/campaignScheduler').runScheduledCampaigns({db:require('./lib/supabase'),execute:broadcastRoutes.sendTemplateBroadcast,onEvent:event=>console.info(JSON.stringify(event))});if(!campaignSchedulerReady){console.info(JSON.stringify({event:'campaign_scheduler_ready'}));campaignSchedulerReady=true}},
+ onError:()=>console.error('Campaign scheduler batch failed')
+})
+process.once('SIGTERM',stopCampaignScheduler)
+process.once('SIGINT',stopCampaignScheduler)
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => {
   console.log(`ZedPing backend running on port ${PORT}`)

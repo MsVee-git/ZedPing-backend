@@ -15,8 +15,8 @@ test('template broadcast review is manager-only and resolves every browser selec
 })
 
 test('template send repeats review validation and does not accept a browser recipient list', () => {
-  const sendSection = source.slice(source.indexOf("router.post('/send-template'"), source.indexOf("router.post('/send',"))
-  assert.match(sendSection, /await templateReview\(req\.workspace\.customerId, req\.body \|\| \{\}\)/)
+  const sendSection = source.slice(source.indexOf("async function sendTemplateBroadcast"), source.indexOf("router.post('/send',"))
+  assert.match(sendSection, /await templateReview\(req\.workspace\.customerId, req\.body \|\| \{\}, req\.scheduledRecipients\)/)
   assert.doesNotMatch(sendSection, /req\.body\?\.contacts/)
   assert.match(sendSection, /review\.skipped_recipients/)
 })
@@ -33,7 +33,7 @@ test('broadcast setup exposes a human telephone label while preserving Meta IDs 
 })
 
 test('template and plain broadcasts persist their accepted Meta message IDs for explicit reply resolution', () => {
-  const templateSend = source.slice(source.indexOf("router.post('/send-template'"), source.indexOf("router.post('/send',"))
+  const templateSend = source.slice(source.indexOf("async function sendTemplateBroadcast"), source.indexOf("router.post('/send',"))
   const plainSend = source.slice(source.indexOf("router.post('/send',"), source.indexOf("router.get('/scheduled'"))
   assert.match(templateSend, /renderedTemplatePreview\(review\.template, recipient\.template_components\)/)
   assert.match(templateSend, /meta_message_id: metaResult\?\.messages\?\.\[0\]\?\.id \|\| null/)

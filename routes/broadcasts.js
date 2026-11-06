@@ -112,10 +112,10 @@ function fail(res, error) {
   return res.status(502).json({ error: 'Broadcast details could not be prepared. Please try again.' })
 }
 
-async function templateReview(workspace, body) {
+async function templateReview(workspace, body, snapshot = null) {
   const number = await numberFor(workspace, body?.whatsapp_number_id)
   if (!number) return { error: 'Choose a connected WhatsApp number in the active workspace.', status: 404 }
-  const audience = await broadcastAudience(workspace, body)
+  const audience = snapshot ? { audience: {type: 'scheduled_snapshot'}, recipients: snapshot } : await broadcastAudience(workspace, body)
   if (audience.error) return audience
   const catalog = await loadWorkspaceTemplates(workspace, number.id)
   if (catalog.kind !== 'ok') return { error: 'Templates are unavailable for this WhatsApp number.', status: 409 }
@@ -155,12 +155,12 @@ router.post('/review-template', requireAdmin, async (req, res) => {
   } catch (error) { fail(res, error) }
 })
 
-router.post('/send-template', requireAdmin, parseBroadcastUpload, async (req, res) => {
+async function sendTemplateBroadcast(req, res) {
   let activeActivity = null
   const results = []
   try {
     // The review is repeated at this boundary. Browser state is never a grant.
-    const review = await templateReview(req.workspace.customerId, req.body || {})
+    const review = await templateReview(req.workspace.customerId, req.body || {}, req.scheduledRecipients)
     if (review.error) return res.status(review.status || 400).json({ error: review.error })
     if (!review.eligible_recipients) return res.status(400).json({ error: 'No recipients can receive this template.' })
     if (review.skipped_recipients) return res.status(400).json({ error: 'Resolve all required template values before sending.' })
@@ -169,8 +169,11 @@ router.post('/send-template', requireAdmin, parseBroadcastUpload, async (req, re
     const needsMedia = ['image', 'document'].includes(mediaType)
     if (needsMedia) req.file = validateTemplateHeaderMedia(req.file, mediaType)
     if (!needsMedia && req.file) return res.status(400).json({ error: 'This template does not use header media.' })
+    if (req.body?.scheduled_at && !req.scheduledActivity) {
+      return await require('../lib/campaignScheduler').saveScheduledCampaign({db:supabase,req,res,review})
+    }
     const mediaId = needsMedia ? await uploadWorkspaceMedia({number:review.number,customerId:req.workspace.customerId,file:req.file}) : null
-    const { data: activity, error: activityError } = await supabase.from('scheduled_broadcasts').insert({ customer_id: req.workspace.customerId, broadcast_name: String(req.body?.broadcast_name || review.template.name).trim().slice(0, 160) || review.template.name, contacts: review.recipients.map(({ id, name, phone_number }) => ({ id, name, phone_number })), message: '[Template] ' + review.template.name + ' (' + review.template.language + ')', phone_number_id: review.number.phone_number_id, scheduled_at: new Date().toISOString(), status: 'sending' }).select().single()
+    const { data: activity, error: activityError } = req.scheduledActivity ? {data:req.scheduledActivity} : await supabase.from('scheduled_broadcasts').insert({ customer_id: req.workspace.customerId, broadcast_name: String(req.body?.broadcast_name || review.template.name).trim().slice(0, 160) || review.template.name, contacts: review.recipients.map(({ id, name, phone_number }) => ({ id, name, phone_number })), message: '[Template] ' + review.template.name + ' (' + review.template.language + ')', phone_number_id: review.number.phone_number_id, scheduled_at: new Date().toISOString(), status: 'sending' }).select().single()
     if (activityError) throw activityError
     activeActivity = activity
     // Persist the campaign before acknowledging it. The same server-side loop
@@ -217,6 +220,17 @@ router.post('/send-template', requireAdmin, parseBroadcastUpload, async (req, re
     }
     fail(res, error)
   }
+}
+
+router.post('/send-template', requireAdmin, parseBroadcastUpload, sendTemplateBroadcast)
+router.post('/scheduled/:id/cancel', requireAdmin, async (req,res) => {
+  try {
+    const {data,error}=await supabase.rpc('cancel_scheduled_campaign',{p_customer_id:req.workspace.customerId,p_id:req.params.id})
+    if(error)throw error
+    if(!data)return res.status(409).json({error:'This campaign has already started or is no longer scheduled.'})
+    if(data.media_path)await supabase.storage.from('campaign-media').remove([data.media_path])
+    res.json({success:true})
+  } catch (_) {res.status(500).json({error:'Could not cancel the scheduled campaign.'})}
 })
 
 router.post('/send', requireAdmin, async (req, res) => {
@@ -251,7 +265,7 @@ router.post('/send', requireAdmin, async (req, res) => {
 })
 
 router.get('/scheduled', async (req, res) => {
-  const { data, error } = await supabase.from('scheduled_broadcasts').select('*').eq('customer_id', req.workspace.customerId).order('scheduled_at')
+  const { data, error } = await supabase.from('scheduled_broadcasts').select('*').eq('customer_id', req.workspace.customerId).order('scheduled_at', {ascending:false})
   if (error) return res.status(500).json({ error: 'Could not load broadcast activity.' })
   res.json(data)
 })
@@ -260,7 +274,7 @@ router.get('/scheduled', async (req, res) => {
 router.get('/scheduled/:id', async (req, res) => {
   try {
     const { data, error } = await supabase.from('scheduled_broadcasts')
-      .select('id,broadcast_name,message,contacts,status,sent_count,failed_count,created_at,scheduled_at,completed_at')
+      .select('id,broadcast_name,message,contacts,status,sent_count,failed_count,created_at,scheduled_at,completed_at,failure_reason')
       .eq('id', req.params.id).eq('customer_id', req.workspace.customerId).maybeSingle()
     if (error) throw error
     if (!data) return res.status(404).json({ error: 'Broadcast not found.' })
@@ -291,5 +305,6 @@ router.get('/scheduled/:id', async (req, res) => {
 })
 
 module.exports = router
+module.exports.sendTemplateBroadcast = sendTemplateBroadcast
 
 

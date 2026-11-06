@@ -9,6 +9,6 @@ test('all-contact broadcasts derive, deduplicate, filter, and revalidate recipie
   assert.match(source, /loadAllWorkspaceContacts\(supabase, workspace/)
   assert.match(source, /dedupeRecipients\(contacts \|\| \[\]\)/)
   assert.match(source, /filterWorkspaceMarketingRecipients\(supabase, workspace, audience\.recipients\)/)
-  const sendTemplate = source.slice(source.indexOf("router.post('/send-template'"), source.indexOf("router.post('/send'"))
-  assert.match(sendTemplate, /templateReview\(req\.workspace\.customerId, req\.body \|\| \{\}\)/)
+  const sendTemplate = source.slice(source.indexOf("async function sendTemplateBroadcast"), source.indexOf("router.post('/send'"))
+  assert.match(sendTemplate, /templateReview\(req\.workspace\.customerId, req\.body \|\| \{\}, req\.scheduledRecipients\)/)
 })
