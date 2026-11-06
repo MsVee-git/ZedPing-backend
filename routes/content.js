@@ -180,6 +180,19 @@ router.get('/:id/knowledge-ingestions', async (req,res) => {
   } catch(error) { res.status(error.status || 500).json({error:error.message || 'Unable to load image knowledge'}) }
 })
 
+// Extraction is explicitly requested after upload; it never delays saving a file.
+router.post('/:id/extract-document', requireAdmin, async (req, res) => {
+  try {
+    const item = await ownedItem(req.workspace.customerId, req.params.id)
+    if (item.archived_at || item.content_type !== 'DOCUMENT' || !item.storage_path) return res.status(400).json({ error:'Choose an active document to extract' })
+    const { data, error } = await supabase.storage.from(CONTENT_BUCKET).download(item.storage_path)
+    if (error || !data) throw new Error('Unable to read document')
+    const { extractDocumentKnowledge } = require('../lib/openai')
+    const result = await extractDocumentKnowledge({ buffer:Buffer.from(await data.arrayBuffer()), mimeType:item.mime_type, filename:item.original_file_name || 'document.pdf' })
+    res.json({ text:result.text, notes:result.notes, source_item_id:item.id })
+  } catch (_) { res.status(502).json({ error:'Could not extract this document. Try again or upload a shorter PDF, Word, Excel or CSV file. Your uploaded file is saved.' }) }
+})
+
 router.post('/:id/extract-knowledge', requireAdmin, async (req,res) => {
   try { res.status(201).json({ ingestion: await startExtraction(req, await ownedItem(req.workspace.customerId, req.params.id)) }) }
   catch(error) { res.status(error.status || 400).json({ error:error.message || 'Unable to analyze this image' }) }
