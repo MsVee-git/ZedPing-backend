@@ -506,7 +506,7 @@ async function runLiveAiTurn(ctx, session, agent, version) {
   const quotedContext = aiReplyContext(ctx.replyToMessage)
   const adContext=adReferralContext(ctx.adReferral)
   const customerTurn = adContext || quotedContext ? [adContext,quotedContext,`Customer message:\n${ctx.body}`].filter(Boolean).join('\n\n') : ctx.body
-  const live = buildLiveSystem(agent, version, customerTurn)
+  const live = buildLiveSystem(agent, version, customerTurn, session.messages || [])
   let handoffStarted = false
   const handoff = async (reason, reply, commercialContext = null) => {
     handoffStarted = true
