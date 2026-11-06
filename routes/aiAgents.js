@@ -123,8 +123,8 @@ async function readConfig(body, customerId) {
   return { template, name, agentType:TYPES.has(body?.agent_type) ? body.agent_type : (template.key === 'sales_interest' ? 'sales' : template.key === 'static_availability' ? 'booking' : 'support'),
     configuration:{ communication_style:style, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases }, ...(commercialAction ? { commercial_action:commercialAction } : {}), shareable_content_item_ids:attachments.map(item => item.id), shareable_attachments:attachments, knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
 }
-function buildSystem(agent, knowledge, question) {
-  return buildLiveSystem(agent, { configuration:activatedConfiguration(agent), knowledge_snapshot:knowledgeSnapshot(knowledge) }, question).prompt
+function buildSystem(agent, knowledge, question, history = []) {
+  return buildLiveSystem(agent, { configuration:activatedConfiguration(agent), knowledge_snapshot:knowledgeSnapshot(knowledge) }, question, history).prompt
 }
 function wouldHandoff(config, messages, hasKnowledge) {
   const last = String(messages[messages.length - 1]?.content || '').toLowerCase()
@@ -261,7 +261,7 @@ router.post('/:id/test', requireAdmin, async (req,res) => {
     const messages=boundedHistory(req.body?.messages || []).slice(-MAX_TEST_MESSAGES)
     if (!messages.length || messages[messages.length-1].role !== 'user') throw new Error('Enter a customer question to test this draft')
     const knowledge=await knowledgeForAgent(req.workspace.customerId,agent.id,true)
-    const prompt=buildSystem(agent,knowledge,messages[messages.length-1].content)
+    const prompt=buildSystem(agent,knowledge,messages[messages.length-1].content,messages.slice(0,-1))
     const completion=await getAICompletion(prompt,messages,null)
     const commercial = commercialTurn(agent.zoe_configuration, messages[messages.length-1]?.content, messages.slice(0,-1), null)
     const requestedReason=configuredHandoff(agent.zoe_configuration, messages[messages.length-1]?.content) || (commercial?.kind === 'handoff' ? commercial.reason : null)
