@@ -1,3 +1,4 @@
+const { scheduleFollowups, cancelFollowups } = require('../lib/leadFollowups')
 const {normalizeAdReferral,profileNameFor,adReferralContext}=require('../lib/whatsappAdReferral')
 const { sendWorkspaceText, sendWorkspaceAttachment } = require('../lib/whatsappRuntime')
 const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
@@ -218,6 +219,7 @@ async function processMessage(ctx) {
 
 async function runInboundAutomation(ctx) {
   const conversation = ctx.conversation
+  await cancelFollowups(supabase,ctx.customerId,conversation.id).catch(()=>console.error("Lead follow-up cancellation failed"))
   if (isMarketingOptOutCommand(ctx.body)) return
   // This server-side guard is intentionally before AI, flow and keyword execution.
   // Needs-attention and human conversations keep receiving/persisting inbound
@@ -564,6 +566,7 @@ async function runLiveAiTurn(ctx, session, agent, version) {
     }
     const nextHistory = boundedHistory([...history, { role: 'assistant', content: reply }])
     await updateLiveSession(ctx, session, { messages:nextHistory })
+    await scheduleFollowups(supabase,{customerId:ctx.customerId,conversation:ctx.conversation,agent,session,config:live.configuration.followups,latestMessage:ctx.body}).catch(()=>console.error('Lead follow-up scheduling failed'))
     await recordAiExecutionEvent(supabase, {
       customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
       agentVersion: session.agent_version, model: completion.model, outcome: 'replied', executionMode: 'live',
