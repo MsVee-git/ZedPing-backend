@@ -1,12 +1,12 @@
 # AI lead follow-ups
 
-This opt-in agent feature schedules future Live AI enquiries only. It does not backfill old leads. All offsets are from the last inbound customer message, not from previous follow-ups:
+Live agents automatically schedule follow-ups for eligible new enquiries. It does not backfill old leads. All offsets are from the last inbound customer message, not from previous follow-ups:
 
 | Step | Behaviour |
 | --- | --- |
 | 1 hour | Generate a concise contextual follow-up through the existing precision review. Skip unsupported output. |
-| 24 hours | Send the agent's selected approved static marketing template. |
-| 72 hours | Send the final selected approved static marketing template. |
+| 24 hours | Send an approved static marketing template for this step. |
+| 72 hours | Send the approved final static marketing template. |
 | 96 hours | Resolve the unanswered conversation, retaining its history. No closing message. |
 
 ## Release order
@@ -14,7 +14,7 @@ This opt-in agent feature schedules future Live AI enquiries only. It does not b
 1. Apply `supabase/migrations/20261106195106_ai_lead_followup_jobs.sql` and verify its RLS, workspace-integrity trigger, constraints and indexes.
 2. Deploy the backend, then dashboard. Keep `AI_LEAD_FOLLOWUPS_ENABLED` disabled until deployment checks pass.
 3. Set `AI_LEAD_FOLLOWUPS_ENABLED=true` in the intended backend environment and verify worker startup.
-4. On each intended Live agent, enable Lead follow-ups, select approved marketing templates for 24 and 72 hours, save the draft and explicitly Update Live. No existing agent is enabled automatically. Templates must have body/footer text only, without variables, headers or buttons.
+4. The 1-hour step works automatically for eligible Live agents. For later steps, approve static marketing templates named `zedping_ai_followup_24h` and `zedping_ai_followup_72h` on each WhatsApp business account. The worker uses existing saved selections where applicable and otherwise resolves these names. Missing or unapproved templates block that step. Templates must have body/footer text only, without variables, headers or buttons.
 5. Use consented test leads to exercise sends and verify the queue and inbox. The worker polls every 30 seconds; times are approximate, not exact-second guarantees.
 
 ## Runtime guarantees and limits

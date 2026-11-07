@@ -1,4 +1,3 @@
-const { normalizeFollowups, eligibleTemplate } = require('../lib/leadFollowupPolicy')
 const express = require('express')
 const router = express.Router()
 const supabase = require('../lib/supabase')
@@ -121,15 +120,8 @@ async function readConfig(body, customerId) {
   const commercialAction = normaliseCommercialAction(body?.commercial_action)
   const attachmentIds = Array.isArray(body?.shareable_content_item_ids) ? body.shareable_content_item_ids : []
   const attachments = await resolveAttachments(supabase, customerId, attachmentIds)
-  const followups = normalizeFollowups(body?.followups)
-  if (followups.enabled) {
-    const {data:number,error} = await supabase.from('whatsapp_numbers').select('*').eq('customer_id',customerId).eq('id',body.whatsapp_number_id).eq('status','connected').maybeSingle()
-    if(error || !number) throw new Error('Select a connected WhatsApp number for follow-ups')
-    const list = await require('../lib/metaTemplates').createMetaTemplateClient().listTemplates({wabaId:number.whatsapp_business_account_id,accessToken:await require('../lib/whatsappCredentials').resolveWhatsAppAccessToken(number,{customerId})})
-    for(const id of [followups.template_24h_id,followups.template_72h_id]) if(!eligibleTemplate(list.find(item=>String(item.id)===id))) throw new Error('Select approved marketing templates with body text only and no variables for follow-ups')
-  }
   return { template, name, agentType:TYPES.has(body?.agent_type) ? body.agent_type : (template.key === 'sales_interest' ? 'sales' : template.key === 'static_availability' ? 'booking' : 'support'),
-    configuration:{ followups, communication_style:style, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases }, ...(commercialAction ? { commercial_action:commercialAction } : {}), shareable_content_item_ids:attachments.map(item => item.id), shareable_attachments:attachments, knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
+    configuration:{ communication_style:style, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases }, ...(commercialAction ? { commercial_action:commercialAction } : {}), shareable_content_item_ids:attachments.map(item => item.id), shareable_attachments:attachments, knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
 }
 function buildSystem(agent, knowledge, question, history = []) {
   return buildLiveSystem(agent, { configuration:activatedConfiguration(agent), knowledge_snapshot:knowledgeSnapshot(knowledge) }, question, history).prompt
@@ -147,10 +139,16 @@ async function knowledgeForAgent(customerId, agentId, withText = false) {
   return resolveEligibleKnowledge(supabase,customerId,(data || []).map(row=>row.content_library_item_id))
 }
 async function replaceKnowledge(customerId, agentId, items) {
-  const { error: removeError } = await supabase.from('ai_agent_knowledge_items').delete().eq('customer_id', customerId).eq('agent_id', agentId)
-  if (removeError) throw removeError
-  if (!items.length) return
-  const { error } = await supabase.from('ai_agent_knowledge_items').insert(items.map(item => ({ customer_id:customerId, agent_id:agentId, content_library_item_id:item.id })))
+  if (items.length) {
+    const { error } = await supabase.from('ai_agent_knowledge_items').upsert(
+      items.map(item => ({ customer_id:customerId, agent_id:agentId, content_library_item_id:item.id })),
+      { onConflict:'agent_id,content_library_item_id', ignoreDuplicates:true }
+    )
+    if (error) throw error
+  }
+  let removal = supabase.from('ai_agent_knowledge_items').delete().eq('customer_id',customerId).eq('agent_id',agentId)
+  if (items.length) removal = removal.not('content_library_item_id','in',`(${items.map(item => item.id).join(',')})`)
+  const { error } = await removal
   if (error) throw error
 }
 function assertActivatedSnapshot(agent, version) {
@@ -237,6 +235,7 @@ router.patch('/:id/draft', requireAdmin, async (req,res) => {
     const current = await agentForWorkspace(req.workspace.customerId, req.params.id)
     if (!['draft','paused','active'].includes(current.lifecycle_status)) throw new Error('Only a draft, paused, or active AI Agent can be edited')
     const input = await readConfig(req.body, req.workspace.customerId)
+    if (current.zoe_configuration?.followups?.enabled === true) input.configuration.followups = current.zoe_configuration.followups
     const number = await workspaceNumber(req.workspace.customerId, req.body?.whatsapp_number_id || current.whatsapp_number_id)
     // Live routing selects an agent by its bound number before loading the
     // immutable activated version. Letting an active draft change that binding
@@ -257,7 +256,13 @@ router.patch('/:id/draft', requireAdmin, async (req,res) => {
   } catch(error) {
     console.warn('ai_agent_draft_update_failed', { customer_id:req.workspace.customerId, agent_id:req.params.id, code:error?.code || null, reason:String(error?.message || 'unknown').slice(0,160) })
     const status=error?.code === '23505' ? 409 : 400
-    res.status(status).json({error:'We couldn\'t save your changes. Please check the selected approved Text items and try again.'})
+    const actionable = [
+      /^Select a connected WhatsApp number from this workspace$/,
+      /^Pause the active AI Agent before changing its WhatsApp number$/,
+      /^Every knowledge item must be active approved knowledge from this workspace$/,
+      /^Assistant name is (required|too long)$/
+    ].some(pattern => pattern.test(String(error?.message || '')))
+    res.status(status).json({error:actionable ? error.message : "We couldn't save your changes. Please try again."})
   }
 })
 router.post('/:id/test', requireAdmin, async (req,res) => {
