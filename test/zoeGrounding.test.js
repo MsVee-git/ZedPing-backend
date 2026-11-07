@@ -1,3 +1,4 @@
+const vm = require('node:vm')
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -79,6 +80,34 @@ test('handoff confirmation clearly moves the customer to the business team witho
   assert.match(message, /stay available here on WhatsApp/)
   assert.ok(message.length < 150)
   assert.doesNotMatch(message, /shortly|immediately|within \d|minutes|hours/i)
+})
+
+test('the activated agent handoff name takes precedence over the workspace brand', async () => {
+  const start = webhookSource.indexOf('async function businessNameForHandoff')
+  const end = webhookSource.indexOf('async function handoffLiveAi', start)
+  let workspaceLookups = 0
+  const query = {
+    select: () => query,
+    eq: () => query,
+    async maybeSingle() {
+      workspaceLookups++
+      return { data:{ business_name:'Coreline Systems' }, error:null }
+    }
+  }
+  const resolve = vm.runInNewContext(`(${webhookSource.slice(start, end).trim()})`, {
+    supabase:{ from:() => query }
+  })
+  const agent = { name:'Braai House demo agent', zoe_configuration:{ handoff:{ business_name:'Draft name' } } }
+  const version = { configuration:{ configuration:{ handoff:{ business_name:'Braai House' } } } }
+  const live = buildLiveSystem(agent, version, 'Can I speak to someone?')
+  const ctx = { customerId:'workspace' }
+  assert.match(live.prompt, /assistant for Braai House/)
+  const confirmation = handoffConfirmation(await resolve(ctx, agent, live.configuration))
+  assert.match(confirmation, /Braai House team/)
+  assert.doesNotMatch(confirmation, /Coreline Systems|Draft name/)
+  assert.equal(workspaceLookups, 0)
+  assert.equal(await resolve(ctx, agent, {}), 'Coreline Systems')
+  assert.equal(workspaceLookups, 1)
 })
 
 test('live handoff sends one confirmation before Team Inbox state and preserves later suppression', () => {

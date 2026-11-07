@@ -117,11 +117,12 @@ async function readConfig(body, customerId) {
   if (!STYLES.has(style)) throw new Error('Communication style is invalid')
   const handoff = body?.handoff && typeof body.handoff === 'object' && !Array.isArray(body.handoff) ? body.handoff : {}
   const phrases = Array.isArray(handoff.phrases) ? [...new Set(handoff.phrases.map(value => cleanText(value, 'Escalation phrase', 100)).filter(Boolean))].slice(0, 5) : []
+  const handoffBusinessName = cleanText(handoff.business_name, 'Handoff business name', 160)
   const commercialAction = normaliseCommercialAction(body?.commercial_action)
   const attachmentIds = Array.isArray(body?.shareable_content_item_ids) ? body.shareable_content_item_ids : []
   const attachments = await resolveAttachments(supabase, customerId, attachmentIds)
   return { template, name, agentType:TYPES.has(body?.agent_type) ? body.agent_type : (template.key === 'sales_interest' ? 'sales' : template.key === 'static_availability' ? 'booking' : 'support'),
-    configuration:{ communication_style:style, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases }, ...(commercialAction ? { commercial_action:commercialAction } : {}), shareable_content_item_ids:attachments.map(item => item.id), shareable_attachments:attachments, knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
+    configuration:{ communication_style:style, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases, ...(handoffBusinessName ? { business_name:handoffBusinessName } : {}) }, ...(commercialAction ? { commercial_action:commercialAction } : {}), shareable_content_item_ids:attachments.map(item => item.id), shareable_attachments:attachments, knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
 }
 function buildSystem(agent, knowledge, question, history = []) {
   return buildLiveSystem(agent, { configuration:activatedConfiguration(agent), knowledge_snapshot:knowledgeSnapshot(knowledge) }, question, history).prompt
@@ -260,7 +261,8 @@ router.patch('/:id/draft', requireAdmin, async (req,res) => {
       /^Select a connected WhatsApp number from this workspace$/,
       /^Pause the active AI Agent before changing its WhatsApp number$/,
       /^Every knowledge item must be active approved knowledge from this workspace$/,
-      /^Assistant name is (required|too long)$/
+      /^Assistant name is (required|too long)$/,
+      /^Handoff business name is (invalid|too long)$/
     ].some(pattern => pattern.test(String(error?.message || '')))
     res.status(status).json({error:actionable ? error.message : "We couldn't save your changes. Please try again."})
   }
