@@ -91,7 +91,7 @@ test('live handoff sends one confirmation before Team Inbox state and preserves 
   assert.ok(handoffBody.indexOf('await outgoing(ctx, customerMessage)') < handoffBody.indexOf('await transitionAiToHandoff'))
   assert.match(webhookSource, /if \(handoffStarted\) throw _/)
   assert.match(processBody, /shouldSuppressAutomation\(conversation\)/)
-  assert.ok(processBody.indexOf('shouldSuppressAutomation(conversation)') < processBody.indexOf('checkAISession(ctx)'))
+  assert.ok(processBody.indexOf('shouldSuppressAutomation(conversation)') < processBody.indexOf('checkAISession(ctx, followupsCancelled)'))
 })
 
 

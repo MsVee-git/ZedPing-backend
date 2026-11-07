@@ -28,8 +28,8 @@ function completionHarness(verdict,{failure=false}={}) {
  const fn=source.slice(source.indexOf('async function getAICompletion'),source.indexOf('async function getAIResponse'))
  const calls=[]
  const context={BETA_MODEL:'test',SAFETY_RULES:'Safety',PRECISION_RULES,boundedHistory,boundedReply,businessPrompt:s=>s,reviewReply,fallbackReply,
- openai:{chat:{completions:{create:async request=>{
- calls.push(request)
+ openai:{chat:{completions:{create:async (request,options)=>{
+ calls.push({request,options})
  if(calls.length===1)return {choices:[{message:{content:'The cover is K999 and includes fitting.'}}],usage:{prompt_tokens:10,completion_tokens:10}}
  if(failure)throw new Error('timeout')
  return {choices:[{message:{content:JSON.stringify({supported:verdict})},finish_reason:'stop'}],usage:{prompt_tokens:20,completion_tokens:5}}
@@ -45,6 +45,10 @@ test('a rejected price claim is never returned and review usage is counted',asyn
  assert.match(result.text,/team.*confirm/)
  assert.equal(result.precisionCheck,'rejected');assert.equal(result.inputTokens,30);assert.equal(result.outputTokens,15)
  assert.equal(h.calls.length,2)
+ assert.equal(h.calls[0].options.timeout,12000)
+ assert.equal(h.calls[0].options.maxRetries,0)
+ assert.equal(h.calls[1].options.timeout,8000)
+ assert.equal(h.calls[1].options.maxRetries,0)
 })
 
 test('review outage fails closed; disabled unknown handoff is respected',async()=>{

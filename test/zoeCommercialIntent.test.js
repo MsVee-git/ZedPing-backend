@@ -119,7 +119,7 @@ test('quotation handoff explicitly says the business team will prepare the quota
 
 test('runtime retains normal human takeover precedence and commercial handoff metadata', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhook.js'), 'utf8')
-  assert.ok(source.indexOf('shouldSuppressAutomation(conversation)') < source.indexOf('checkAISession(ctx)'))
+  assert.ok(source.indexOf('shouldSuppressAutomation(conversation)') < source.indexOf('checkAISession(ctx, followupsCancelled)'))
   assert.match(source, /commercialTurn\(live\.configuration, customerTurn, history\.slice\(0, -1\), session\.commercial_context\)/)
   assert.match(source, /commercialContext\?\.handoff_reason \|\| 'Quotation requested'/)
   assert.match(source, /commercial_context:commercialMetadata\(commercialContext\)/)
@@ -131,7 +131,7 @@ test('commercial handling preserves immutable activated configuration, inbound i
   const control = fs.readFileSync(path.join(__dirname, '..', 'lib', 'conversationState.js'), 'utf8')
   const liveVersion = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhook.js'), 'utf8')
   assert.match(webhook, /await claimInboundEvent\(ctx\)/)
-  assert.ok(webhook.indexOf('await claimInboundEvent(ctx)') < webhook.indexOf('await checkAISession(ctx)'))
+  assert.ok(webhook.indexOf('await claimInboundEvent(ctx)') < webhook.indexOf('await checkAISession(ctx, followupsCancelled)'))
   assert.match(liveVersion, /not\('activated_at', 'is', null\)/)
   assert.match(liveVersion, /order\('version', \{ ascending: false \}\)/)
   assert.match(control, /conversation\.status === 'resolved'/)

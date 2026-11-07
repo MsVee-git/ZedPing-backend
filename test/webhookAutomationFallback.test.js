@@ -11,7 +11,7 @@ test('non-AI inbound messages retain deterministic automation fallback', () => {
   assert.match(source, /const away = selectAwayAutomation/)
   assert.match(source, /const welcome = selectWelcomeAutomation/)
   assert.match(source, /const fallback = selectDefaultAutomation/)
-  assert.ok(source.indexOf('shouldSuppressAutomation(conversation)') < source.indexOf('checkAISession(ctx)'))
+  assert.ok(source.indexOf('shouldSuppressAutomation(conversation)') < source.indexOf('checkAISession(ctx, followupsCancelled)'))
   assert.ok(source.indexOf('if (await continueFlow(ctx, outgoing)) return') < source.indexOf('await checkAutomations(ctx)'))
 })
 

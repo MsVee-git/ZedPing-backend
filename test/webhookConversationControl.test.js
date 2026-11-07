@@ -7,7 +7,7 @@ test('webhook checks conversation control before all automation engines', () => 
   const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhook.js'), 'utf8')
   const guard = source.indexOf('if (shouldSuppressAutomation(conversation))')
   assert.ok(guard > -1)
-  assert.ok(guard < source.indexOf('if (await checkAISession(ctx)) return'))
+  assert.ok(guard < source.indexOf('if (await checkAISession(ctx, followupsCancelled)) return'))
   assert.ok(guard < source.indexOf('if (await continueFlow(ctx, outgoing)) return'))
   assert.ok(guard < source.indexOf('await checkAutomations(ctx)'))
 })

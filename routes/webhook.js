@@ -23,7 +23,7 @@ const { startFlow, continueFlow } = require('../lib/chatbotExecution')
 const { normalizePhone } = require('../lib/contactImport')
 const { buildLiveSystem, configuredHandoff, handoffReply, handoffConfirmation, isCustomerSafeReply, hasNaturalTeamTransition, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
 const { commercialTurn, commercialMetadata } = require('../lib/zoeCommercial')
-const { mayExecute } = require('../lib/aiDeploymentMode')
+const { deploymentMode, isActiveAgent, mayExecute } = require('../lib/aiDeploymentMode')
 const { parseInboundMedia } = require('../lib/inboundMedia')
 const { parseInboundReplyContext, aiReplyContext, matchingReplyMessage } = require('../lib/replyContext')
 const { attachmentDecision, attachmentCaption, fileForAttachment, snapshot } = require('../lib/contentLibraryAttachments')
@@ -219,17 +219,19 @@ async function processMessage(ctx) {
 
 async function runInboundAutomation(ctx) {
   const conversation = ctx.conversation
-  await cancelFollowups(supabase,ctx.customerId,conversation.id).catch(()=>console.error("Lead follow-up cancellation failed"))
-  if (isMarketingOptOutCommand(ctx.body)) return
+  const followupsCancelled = cancelFollowups(supabase, ctx.customerId, conversation.id)
+    .catch(() => console.error('Lead follow-up cancellation failed'))
+  if (isMarketingOptOutCommand(ctx.body)) return followupsCancelled
   // This server-side guard is intentionally before AI, flow and keyword execution.
   // Needs-attention and human conversations keep receiving/persisting inbound
   // messages but cannot produce an automated response.
   if (shouldSuppressAutomation(conversation)) {
+    await followupsCancelled
     await recordAutomationEvent(ctx, 'skipped', 'skipped', { reason: 'team_inbox_control' }).catch(() => {})
     return
   }
 
-  if (await checkAISession(ctx)) return
+  if (await checkAISession(ctx, followupsCancelled)) return
   if (await startLiveZoeSession(ctx)) return
   if (await continueFlow(ctx, outgoing)) return
   await checkAutomations(ctx)
@@ -399,6 +401,12 @@ async function isApprovedTestContact(ctx, agentId) {
   return Boolean(data)
 }
 
+async function mayReplyToContact(ctx, agent) {
+  if (!isActiveAgent(agent)) return false
+  const approved = deploymentMode(agent) === 'test' && await isApprovedTestContact(ctx, agent.id)
+  return mayExecute(agent, approved)
+}
+
 async function loadLiveVersion(ctx, agent) {
   const { data, error } = await supabase.from('ai_agent_configuration_versions')
     .select('version,configuration,knowledge_snapshot,activated_at')
@@ -419,7 +427,7 @@ async function startLiveZoeSession(ctx) {
   if (error) throw error
   const agent = selectSoleActiveAgent(agents)
   if (!agent || !ctx.contact?.id || !ctx.conversation?.id) return false
-  if (!mayExecute(agent, await isApprovedTestContact(ctx, agent.id))) return false
+  if (!(await mayReplyToContact(ctx, agent))) return false
   const version = await loadLiveVersion(ctx, agent)
   if (!version) return false
   const now = new Date()
@@ -536,6 +544,7 @@ async function runLiveAiTurn(ctx, session, agent, version) {
   try {
     const file = live.attachmentDecision?.kind === 'selected' ? live.attachmentDecision.item : null
     let completion, reply
+    let modelMs = 0
     if (file) {
       reply = attachmentCaption(file)
       try {
@@ -552,6 +561,7 @@ async function runLiveAiTurn(ctx, session, agent, version) {
       }
     } else {
       completion = await getAICompletion(live.prompt, history, null)
+      modelMs = Date.now() - started
       if (!completion.text) throw new Error('AI response was empty')
       const candidate = removeHandoffMarker(completion.text)
       if (requestsModelHandoff(completion.text) && live.configuration?.handoff?.unknown !== false) {
@@ -569,6 +579,12 @@ async function runLiveAiTurn(ctx, session, agent, version) {
       reply = candidate
       await outgoing(ctx, reply)
     }
+    console.info(JSON.stringify({
+      event: 'whatsapp_ai_reply_timing',
+      path: file ? 'attachment' : 'text',
+      model_ms: modelMs,
+      send_and_record_ms: Date.now() - started - modelMs
+    }))
     const nextHistory = boundedHistory([...history, { role: 'assistant', content: reply }])
     await updateLiveSession(ctx, session, { messages:nextHistory })
     await scheduleFollowups(supabase,{customerId:ctx.customerId,conversation:ctx.conversation,agent,session,config:live.configuration.followups,latestMessage:ctx.body}).catch(()=>console.error('Lead follow-up scheduling failed'))
@@ -591,15 +607,17 @@ async function runLiveAiTurn(ctx, session, agent, version) {
   }
 }
 
-async function checkAISession(ctx) {
-  const { data: session, error } = await supabase.from('ai_agent_sessions').select('*,ai_agents(*)')
+async function checkAISession(ctx, followupsCancelled) {
+  const sessionLookup = supabase.from('ai_agent_sessions').select('*,ai_agents(*)')
     .eq('customer_id', ctx.customerId).eq('whatsapp_number_id', ctx.number.id)
     .eq('contact_phone', ctx.from).eq('conversation_id', ctx.conversation.id).eq('status', 'active').maybeSingle()
+  // Cancellation must finish before a reply can schedule the next follow-ups.
+  const [{ data: session, error }] = await Promise.all([sessionLookup, followupsCancelled])
   if (error) throw error
   if (!session) return false
   const agent = session.ai_agents
   if (!agent || agent.customer_id !== ctx.customerId || agent.whatsapp_number_id !== ctx.number.id ||
-      !mayExecute(agent, await isApprovedTestContact(ctx, agent.id))) {
+      !(await mayReplyToContact(ctx, agent))) {
     await supabase.from('ai_agent_sessions').update({
       status:'cancelled', ended_at:new Date().toISOString(), completion_reason:'agent_not_live_or_contact_not_allowed'
     }).eq('id',session.id).eq('customer_id',ctx.customerId).eq('status','active')
