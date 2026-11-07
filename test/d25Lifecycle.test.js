@@ -1,3 +1,5 @@
+const vm = require('node:vm')
+const { deploymentMode, isActiveAgent, mayExecute } = require('../lib/aiDeploymentMode')
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -44,8 +46,27 @@ test('Resume and Go Live validate immutable snapshots rather than mutable draft 
 })
 
 test('Test and Live routing use server-side deployment mode and preserve human-control precedence', () => {
-  assert.match(webhookSource, /mayExecute\(agent, await isApprovedTestContact\(ctx, agent\.id\)\)/)
-  assert.ok(webhookSource.indexOf('shouldSuppressAutomation(conversation)') < webhookSource.indexOf('checkAISession(ctx)'))
+  assert.match(webhookSource, /deploymentMode\(agent\) === 'test' && await isApprovedTestContact\(ctx, agent\.id\)/)
+  assert.match(webhookSource, /return mayExecute\(agent, approved\)/)
+  assert.ok(webhookSource.indexOf('shouldSuppressAutomation(conversation)') < webhookSource.indexOf('checkAISession(ctx, followupsCancelled)'))
+})
+
+test('live agents skip the test-contact lookup while test agents still require approval', async () => {
+  const start = webhookSource.indexOf('async function mayReplyToContact')
+  const end = webhookSource.indexOf('async function loadLiveVersion', start)
+  const lookedUp = []
+  const mayReplyToContact = vm.runInNewContext(`(${webhookSource.slice(start, end).trim()})`, {
+    deploymentMode, isActiveAgent, mayExecute,
+    isApprovedTestContact: async (_ctx, id) => {
+      lookedUp.push(id)
+      return id === 'allowed-test'
+    }
+  })
+  const active = { lifecycle_status:'active', is_active:true }
+  assert.equal(await mayReplyToContact({}, { ...active, id:'live', deployment_mode:'live' }), true)
+  assert.equal(await mayReplyToContact({}, { ...active, id:'allowed-test', deployment_mode:'test' }), true)
+  assert.equal(await mayReplyToContact({}, { ...active, id:'unapproved-test' }), false)
+  assert.deepEqual(lookedUp, ['allowed-test', 'unapproved-test'])
 })
 
 test('returning an agent to Test Mode terminalizes live sessions before later inbound routing', () => {
