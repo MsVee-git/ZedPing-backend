@@ -1,6 +1,6 @@
 const test=require('node:test')
 const assert=require('node:assert/strict')
-const {plannedJobs,followupEligible,normalizeFollowups,eligibleTemplate}=require('../lib/leadFollowupPolicy')
+const {plannedJobs,followupEligible,eligibleTemplate}=require('../lib/leadFollowupPolicy')
 const {processFollowup,runLeadFollowups,scheduleFollowups}=require('../lib/leadFollowups')
 const anchor='2026-11-01T10:00:00.000Z'
 const config={enabled:true,template_24h_id:'t24',template_72h_id:'t72'}
@@ -52,8 +52,10 @@ test('sequence uses absolute 1/24/72/96-hour offsets and stable anchor',()=>{
  const jobs=plan();assert.deepEqual(jobs.map(job=>job.step),[1,24,72,96]);assert.equal(jobs[2].due_at,'2026-11-04T10:00:00.000Z');assert.equal(jobs[3].due_at,'2026-11-05T10:00:00.000Z')
  assert.equal(jobs[1].template_id,'t24');assert.equal(jobs[2].template_id,'t72')
 })
-test('requires selected templates; disabled/test/declined conversations do not enroll',()=>{
- assert.throws(()=>normalizeFollowups({enabled:true}),/templates/)
+test('live agents schedule automatically; test mode and declined conversations do not enroll',()=>{
+ const jobs=plannedJobs({customerId:'c',agent,conversation,session});
+ assert.deepEqual(jobs.map(job=>job.template_id),[null,'auto:24','auto:72',null])
+ assert.equal(followupEligible(jobs[0],{conversation,contact,agent,version:{...version,configuration:{}},session},Date.parse(anchor)+3600000),true)
  assert.equal(plannedJobs({customerId:'c',agent:{...agent,deployment_mode:'test'},conversation,session,config}).length,0)
  assert.equal(plannedJobs({customerId:'c',agent,conversation,session,config,latestMessage:'No thanks, not interested'}).length,0)
 })
@@ -76,6 +78,17 @@ test('one-hour AI message is recorded and does not move last inbound time',async
 })
 test('24-hour and 72-hour messages use templates, never generated free text',async()=>{
  for(const step of [24,72]){const {job,sent,deps}=fixture(step);deps.complete=()=>{throw Error('Must not generate')};assert.equal((await processFollowup({...deps,job})).state,'done');assert.equal(sent[0][0],'template')}
+})
+test('automatic follow-ups select only the dedicated approved template',async()=>{
+ const {job,sent,deps}=fixture(24)
+ job.template_id='auto:24'
+ const [approved]=await deps.listTemplates()
+ deps.listTemplates=async()=>[approved,{...approved,id:'pending',name:'zedping_ai_followup_24h',status:'PENDING'}]
+ assert.equal((await processFollowup({...deps,job})).state,'blocked')
+ assert.equal(sent.length,0)
+ deps.listTemplates=async()=>[approved,{...approved,id:'default',name:'zedping_ai_followup_24h'}]
+ assert.equal((await processFollowup({...deps,job})).state,'done')
+ assert.equal(sent[0][1].template.name,'zedping_ai_followup_24h')
 })
 test('late worker skips earlier stages instead of sending a burst',async()=>{
  const {job,sent,deps}=fixture(1);deps.now=()=>new Date(Date.parse(anchor)+25*3600000);assert.equal((await processFollowup({...deps,job})).state,'blocked');assert.equal(sent.length,0)
