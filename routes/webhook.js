@@ -458,8 +458,8 @@ async function transitionAiToHandoff(ctx, session, agent, reason, commercialCont
     status: 'needs_attention',
     control_mode: 'needs_attention',
     assigned_user_id: null,
-    handoff_reason: reason === 'quotation_requested'
-      ? String(commercialContext?.handoff_reason || 'Quotation requested').trim().slice(0, 120)
+    handoff_reason: ['quotation_requested', 'booking_requested'].includes(reason)
+      ? String(commercialContext?.handoff_reason || (reason === 'booking_requested' ? 'Booking requested' : 'Quotation requested')).trim().slice(0, 120)
       : 'Requested by assistant',
     handoff_at: now,
     updated_at: now
@@ -525,7 +525,7 @@ async function runLiveAiTurn(ctx, session, agent, version) {
     return handoffLiveAi(ctx, session, agent, reason, reply, commercialContext, live.knowledge.map(item => item.id), live.configuration)
   }
   const history = boundedHistory([...(session.messages || []), { role: 'user', content: customerTurn }])
-  const commercial = commercialTurn(live.configuration, customerTurn, history.slice(0, -1), session.commercial_context)
+  const commercial = commercialTurn(live.configuration, customerTurn, history.slice(0, -1), session.commercial_context, ctx.body)
   if (commercial?.kind === 'qualify') {
     await outgoing(ctx, commercial.reply)
     const messages = boundedHistory([...history, { role: 'assistant', content: commercial.reply }])
@@ -537,7 +537,7 @@ async function runLiveAiTurn(ctx, session, agent, version) {
     }).catch(() => {})
     return true
   }
-  if (commercial?.kind === 'handoff') return handoff(commercial.reason, handoffReply(commercial.reason, ctx.body), commercial.context)
+  if (commercial?.kind === 'handoff') return handoff(commercial.reason, commercial.reply || handoffReply(commercial.reason, ctx.body), commercial.context)
 
   const configured = configuredHandoff(live.configuration, ctx.body)
   if (configured) return handoff(configured, handoffReply(configured, ctx.body))

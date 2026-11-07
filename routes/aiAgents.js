@@ -277,9 +277,9 @@ router.post('/:id/test', requireAdmin, async (req,res) => {
     if (!messages.length || messages[messages.length-1].role !== 'user') throw new Error('Enter a customer question to test this draft')
     const knowledge=await knowledgeForAgent(req.workspace.customerId,agent.id,true)
     const prompt=buildSystem(agent,knowledge,messages[messages.length-1].content,messages.slice(0,-1))
-    const completion=await getAICompletion(prompt,messages,null)
     const commercial = commercialTurn(agent.zoe_configuration, messages[messages.length-1]?.content, messages.slice(0,-1), null)
-    const requestedReason=configuredHandoff(agent.zoe_configuration, messages[messages.length-1]?.content) || (commercial?.kind === 'handoff' ? commercial.reason : null)
+    const requestedReason=commercial?.kind === 'handoff' ? commercial.reason : configuredHandoff(agent.zoe_configuration, messages[messages.length-1]?.content)
+    const completion=commercial || requestedReason ? {} : await getAICompletion(prompt,messages,null)
     const candidate=removeHandoffMarker(completion.text)
     const modelRequestedHandoff=agent.zoe_configuration?.handoff?.unknown !== false && requestsModelHandoff(completion.text)
     const handoffReason=requestedReason || (modelRequestedHandoff ? 'no_approved_answer' : null)
@@ -287,7 +287,7 @@ router.post('/:id/test', requireAdmin, async (req,res) => {
     const reply=commercial?.kind === 'qualify'
       ? commercial.reply
       : requestedReason
-      ? handoffReply(requestedReason)
+      ? commercial?.reply || handoffReply(requestedReason)
       : modelRequestedHandoff && (!isCustomerSafeReply(candidate) || !hasNaturalTeamTransition(candidate))
         ? handoffReply('no_approved_answer', messages[messages.length-1]?.content)
         : candidate
