@@ -120,8 +120,8 @@ test('quotation handoff explicitly says the business team will prepare the quota
 test('runtime retains normal human takeover precedence and commercial handoff metadata', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'webhook.js'), 'utf8')
   assert.ok(source.indexOf('shouldSuppressAutomation(conversation)') < source.indexOf('checkAISession(ctx, followupsCancelled)'))
-  assert.match(source, /commercialTurn\(live\.configuration, customerTurn, history\.slice\(0, -1\), session\.commercial_context\)/)
-  assert.match(source, /commercialContext\?\.handoff_reason \|\| 'Quotation requested'/)
+  assert.match(source, /commercialTurn\(live\.configuration, customerTurn, history\.slice\(0, -1\), session\.commercial_context, ctx\.body\)/)
+  assert.match(source, /commercialContext\?\.handoff_reason \|\| \(reason === 'booking_requested' \? 'Booking requested' : 'Quotation requested'\)/)
   assert.match(source, /commercial_context:commercialMetadata\(commercialContext\)/)
   assert.match(source, /commercial_context: null/)
 })
