@@ -477,15 +477,17 @@ async function transitionAiToHandoff(ctx, session, agent, reason, commercialCont
   })
 }
 
-async function businessNameForHandoff(ctx, agent) {
+async function businessNameForHandoff(ctx, agent, configuration) {
+  const name = String(configuration?.handoff?.business_name || '').trim()
+  if (name) return name
   const { data, error } = await supabase.from('customers').select('business_name')
     .eq('id', ctx.customerId).maybeSingle()
   if (error) throw error
   return data?.business_name || agent?.name || 'business'
 }
 
-async function handoffLiveAi(ctx, session, agent, reason, reply, commercialContext = null, retrievalItemIds = []) {
-  const confirmation = handoffConfirmation(await businessNameForHandoff(ctx, agent), reason)
+async function handoffLiveAi(ctx, session, agent, reason, reply, commercialContext = null, retrievalItemIds = [], configuration = null) {
+  const confirmation = handoffConfirmation(await businessNameForHandoff(ctx, agent, configuration), reason)
   const supportedReply = String(reply || '').trim()
   const customerMessage = supportedReply ? supportedReply + '\n\n' + confirmation : confirmation
   // Delivery precedes the Team Inbox transition: a successful transition always
@@ -520,7 +522,7 @@ async function runLiveAiTurn(ctx, session, agent, version) {
   let handoffStarted = false
   const handoff = async (reason, reply, commercialContext = null) => {
     handoffStarted = true
-    return handoffLiveAi(ctx, session, agent, reason, reply, commercialContext, live.knowledge.map(item => item.id))
+    return handoffLiveAi(ctx, session, agent, reason, reply, commercialContext, live.knowledge.map(item => item.id), live.configuration)
   }
   const history = boundedHistory([...(session.messages || []), { role: 'user', content: customerTurn }])
   const commercial = commercialTurn(live.configuration, customerTurn, history.slice(0, -1), session.commercial_context)
