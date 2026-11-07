@@ -26,7 +26,7 @@ const { commercialTurn, commercialMetadata } = require('../lib/zoeCommercial')
 const { mayExecute } = require('../lib/aiDeploymentMode')
 const { parseInboundMedia } = require('../lib/inboundMedia')
 const { parseInboundReplyContext, aiReplyContext, matchingReplyMessage } = require('../lib/replyContext')
-const { attachmentDecision, fileForAttachment, snapshot } = require('../lib/contentLibraryAttachments')
+const { attachmentDecision, attachmentCaption, fileForAttachment, snapshot } = require('../lib/contentLibraryAttachments')
 
 router.get('/', (req, res) => {
   const received = Buffer.from(String(req.query['hub.verify_token'] || ''))
@@ -508,7 +508,7 @@ async function runLiveAiTurn(ctx, session, agent, version) {
   const quotedContext = aiReplyContext(ctx.replyToMessage)
   const adContext=adReferralContext(ctx.adReferral)
   const customerTurn = adContext || quotedContext ? [adContext,quotedContext,`Customer message:\n${ctx.body}`].filter(Boolean).join('\n\n') : ctx.body
-  const live = buildLiveSystem(agent, version, customerTurn, session.messages || [])
+  const live = buildLiveSystem(agent, version, customerTurn, session.messages || [], ctx.body)
   let handoffStarted = false
   const handoff = async (reason, reply, commercialContext = null) => {
     handoffStarted = true
@@ -534,44 +534,49 @@ async function runLiveAiTurn(ctx, session, agent, version) {
 
   const started = Date.now()
   try {
-    const completion = await getAICompletion(live.prompt, history, null)
-    if (!completion.text) throw new Error('AI response was empty')
-    const candidate = removeHandoffMarker(completion.text)
-    if (requestsModelHandoff(completion.text) && live.configuration?.handoff?.unknown !== false) {
-      const reply = isCustomerSafeReply(candidate) && hasNaturalTeamTransition(candidate)
-        ? candidate
-        : handoffReply('no_approved_answer', ctx.body)
-      return handoff('no_approved_answer', reply)
-    }
-    if (!isCustomerSafeReply(candidate)) {
-      if (live.configuration?.handoff?.unknown !== false) {
-        return handoff('no_approved_answer', handoffReply('no_approved_answer', ctx.body))
-      }
-      throw new Error('AI response was not customer-safe')
-    }
-    const reply = candidate
-    if (!reply) throw new Error('AI response was empty')
-    await outgoing(ctx, reply)
-    if (live.attachmentDecision?.kind === 'selected') {
+    const file = live.attachmentDecision?.kind === 'selected' ? live.attachmentDecision.item : null
+    let completion, reply
+    if (file) {
+      reply = attachmentCaption(file)
       try {
-        await outgoingContentAttachment(ctx, live.attachmentDecision.item, 'ai')
+        const delivered = await outgoingContentAttachment(ctx, file, 'ai', reply)
+        if (!delivered) return true
       } catch (_) {
-        // The text reply remains valid. The durable delivery claim prevents a
-        // webhook retry from silently creating a duplicate attachment send.
+        // An uncertain provider outcome may already have delivered the file.
+        // Keep its durable claim and avoid a second customer message.
         await recordAiExecutionEvent(supabase, {
           customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
-          agentVersion: session.agent_version, model: completion.model, outcome: 'failed', executionMode: 'live', errorCategory: 'attachment_send_failed'
+          agentVersion: session.agent_version, model: BETA_MODEL, outcome: 'failed', executionMode: 'live', errorCategory: 'attachment_send_failed'
         }).catch(() => {})
+        return true
       }
+    } else {
+      completion = await getAICompletion(live.prompt, history, null)
+      if (!completion.text) throw new Error('AI response was empty')
+      const candidate = removeHandoffMarker(completion.text)
+      if (requestsModelHandoff(completion.text) && live.configuration?.handoff?.unknown !== false) {
+        const safeReply = isCustomerSafeReply(candidate) && hasNaturalTeamTransition(candidate)
+          ? candidate
+          : handoffReply('no_approved_answer', ctx.body)
+        return handoff('no_approved_answer', safeReply)
+      }
+      if (!isCustomerSafeReply(candidate)) {
+        if (live.configuration?.handoff?.unknown !== false) {
+          return handoff('no_approved_answer', handoffReply('no_approved_answer', ctx.body))
+        }
+        throw new Error('AI response was not customer-safe')
+      }
+      reply = candidate
+      await outgoing(ctx, reply)
     }
     const nextHistory = boundedHistory([...history, { role: 'assistant', content: reply }])
     await updateLiveSession(ctx, session, { messages:nextHistory })
     await scheduleFollowups(supabase,{customerId:ctx.customerId,conversation:ctx.conversation,agent,session,config:live.configuration.followups,latestMessage:ctx.body}).catch(()=>console.error('Lead follow-up scheduling failed'))
     await recordAiExecutionEvent(supabase, {
       customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
-      agentVersion: session.agent_version, model: completion.model, outcome: 'replied', executionMode: 'live',
-      durationMs: Date.now() - started, inputTokens: completion.inputTokens, outputTokens: completion.outputTokens,
-      estimatedCostUsd: estimateCostUsd(completion.model, completion.inputTokens, completion.outputTokens),
+      agentVersion: session.agent_version, model: completion?.model || BETA_MODEL, outcome: 'replied', executionMode: 'live',
+      durationMs: Date.now() - started, inputTokens: completion?.inputTokens, outputTokens: completion?.outputTokens,
+      estimatedCostUsd: estimateCostUsd(completion?.model, completion?.inputTokens, completion?.outputTokens),
       retrievalItemIds: live.knowledge.map(item => item.id)
     }).catch(() => {})
     return true
