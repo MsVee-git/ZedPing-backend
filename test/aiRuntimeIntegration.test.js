@@ -60,3 +60,50 @@ test('manual team control terminates active AI sessions', () => {
   assert.ok(source.includes("reason: 'manual_takeover'"))
   assert.ok(source.includes("reason: 'manual_handoff'"))
 })
+
+test('a completed generic reservation moves to Needs Attention and pauses later AI replies', async () => {
+  const { commercialTurn, commercialMetadata } = require('../lib/zoeCommercial')
+  const { buildLiveSystem, handoffConfirmation } = require('../lib/zoeGrounding')
+  const { shouldSuppressAutomation } = require('../lib/conversationState')
+  const source = fs.readFileSync(require.resolve('../routes/webhook'), 'utf8')
+  const route = source.slice(source.indexOf('async function transitionAiToHandoff'), source.indexOf('async function checkAISession'))
+  const intake = source.slice(source.indexOf('async function runInboundAutomation'), source.indexOf('async function outgoing('))
+  const conversation = { id:'conversation', status:'open', control_mode:'automation' }
+  const session = { id:'session', messages:[], status:'active' }
+  const agent = { id:'agent', name:'Assistant' }
+  const version = { configuration:{ configuration:{ booking_enabled:true, handoff:{business_name:'Demo Restaurant'} } }, knowledge_snapshot:[] }
+  const replies = [], handoffs = []
+  let automationSkips = 0
+  const query = {
+    eq:()=>query, select:()=>query,
+    async maybeSingle() { return { data:conversation } }
+  }
+  const scope = vm.createContext({
+    commercialTurn, commercialMetadata, buildLiveSystem, handoffConfirmation, shouldSuppressAutomation,
+    aiReplyContext:()=>'', adReferralContext:()=>'', boundedHistory:history=>history,
+    isMarketingOptOutCommand:()=>false, cancelFollowups:async()=>{},
+    recordAutomationEvent:async (_ctx, _outcome, _status, { reason })=>{ if (reason === 'team_inbox_control') automationSkips++ },
+    closeActiveAiSessionsForConversation:async()=>{ session.status = 'closed' },
+    recordConversationEvent:async event=>handoffs.push(event),
+    recordAiExecutionEvent:async()=>{}, BETA_MODEL:'test', SESSION_IDLE_MS:60000,
+    outgoing:async (_ctx, text)=>replies.push(text),
+    supabase:{ from:table=>({
+      update(patch) { Object.assign(table === 'conversations' ? conversation : session, patch); return query }
+    }) }
+  })
+  vm.runInContext(route + '\n' + intake, scope)
+  scope.checkAISession = async ctx=>scope.runLiveAiTurn(ctx, session, agent, version)
+  for (const body of ['No, I would like to make a booking', '14 November, 7pm', '3guests', 'Chika', 'Thank you']) {
+    await scope.runInboundAutomation({ body, conversation, customerId:'workspace', number:{ id:'number' } })
+  }
+  assert.equal(conversation.status, 'needs_attention')
+  assert.equal(conversation.control_mode, 'needs_attention')
+  assert.equal(conversation.assigned_user_id, null)
+  assert.equal(session.status, 'closed')
+  assert.equal(handoffs.length, 1)
+  assert.equal(handoffs[0].metadata.reason, 'booking_requested')
+  assert.equal(handoffs[0].metadata.commercial_context.collected.party_size, '3')
+  assert.equal(replies.length, 4)
+  assert.match(replies.at(-1), /Demo Restaurant team will check availability/)
+  assert.equal(automationSkips, 1)
+})
