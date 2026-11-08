@@ -182,7 +182,7 @@ async function snapshot(customerId, agent, userId) {
 router.get('/library', (req,res) => res.json({ templates:TEMPLATES }))
 router.get('/knowledge-items', async (req,res) => {
   try {
-    const { data, error } = await supabase.from('content_library_items').select('id').eq('customer_id', req.workspace.customerId).in('content_type',['TEXT','IMAGE','WHATSAPP_TEMPLATE_REFERENCE']).is('archived_at', null).order('updated_at',{ascending:false})
+    const { data, error } = await supabase.from('content_library_items').select('id').eq('customer_id', req.workspace.customerId).in('content_type',['TEXT','IMAGE','DOCUMENT','WHATSAPP_TEMPLATE_REFERENCE']).is('archived_at', null).order('updated_at',{ascending:false})
     if(error) throw error
     const items=await resolveEligibleKnowledge(supabase,req.workspace.customerId,(data||[]).map(item=>item.id))
     res.json({ items:items.map(item=>({id:item.id,name:item.name,description:item.description,updated_at:item.updated_at,source_type:item.source_type})), limits:{max_items:MAX_KNOWLEDGE_ITEMS,max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS,max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS} })
