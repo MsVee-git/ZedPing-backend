@@ -58,7 +58,7 @@ async function deletionDependencies(customerId, itemId) {
   const labels = []
   if (agentKnowledge.data?.length) labels.push('an AI Agent draft or configuration')
   if (automations.data?.length) labels.push('an automation')
-  if (ingestions.data?.length) labels.push('image knowledge history')
+  if (ingestions.data?.length) labels.push('file knowledge history')
   if ((flowDrafts.data || []).some(flow => JSON.stringify(flow.draft_definition || {}).includes(itemId))) labels.push('a chatbot flow draft')
   if ((flowVersions.data || []).some(version => JSON.stringify(version.definition || {}).includes(itemId))) labels.push('a chatbot flow version')
   if ((agentVersions.data || []).some(version => JSON.stringify(version.knowledge_snapshot || []).includes(itemId))) labels.push('an activated AI knowledge snapshot')
@@ -87,9 +87,9 @@ async function latestRevision(customerId, ingestionId) {
   return data || null
 }
 async function startExtraction(req, item) {
-  if (item.archived_at || item.content_type !== 'IMAGE') throw new Error('Only an active Image item can be analyzed for Zoe')
+  if (item.archived_at || !['IMAGE', 'DOCUMENT'].includes(item.content_type)) throw new Error('Choose an active image or document to extract')
   const { data: pending, error } = await supabase.from('content_library_ingestions').insert({
-    customer_id:req.workspace.customerId, source_content_item_id:item.id, source_kind:'IMAGE', status:'pending', created_by:req.workspace.userId
+    customer_id:req.workspace.customerId, source_content_item_id:item.id, source_kind:item.content_type, status:'pending', created_by:req.workspace.userId
   }).select().single()
   if (error) throw error
   const { data: run, error: processingError } = await supabase.from('content_library_ingestions').update({ status:'processing', updated_at:new Date().toISOString() }).eq('id',pending.id).eq('customer_id',req.workspace.customerId).select().single()
@@ -101,7 +101,7 @@ async function startExtraction(req, item) {
     return publicIngestion(data)
   } catch (error) {
     await supabase.from('content_library_ingestions').update({ status:'failed', error_category:'extraction_unavailable', updated_at:new Date().toISOString() }).eq('id',run.id).eq('customer_id',req.workspace.customerId)
-    throw new Error('We could not analyze this image. Please try Extract Again later.')
+    throw new Error('We could not extract knowledge from this file. Please try again. Your uploaded file is saved.')
   }
 }
 
@@ -172,12 +172,12 @@ router.patch('/:id', requireAdmin, async (req, res) => {
 router.get('/:id/knowledge-ingestions', async (req,res) => {
   try {
     const item = await ownedItem(req.workspace.customerId, req.params.id)
-    if (item.content_type !== 'IMAGE') return res.status(400).json({ error:'This is not an Image item' })
+    if (!['IMAGE', 'DOCUMENT'].includes(item.content_type)) return res.status(400).json({ error:'Choose an image or document' })
     const { data, error } = await supabase.from('content_library_ingestions').select('*').eq('customer_id',req.workspace.customerId).eq('source_content_item_id',item.id).order('created_at',{ascending:false}).limit(12)
     if (error) throw error
     const revisions = await Promise.all((data || []).map(run => latestRevision(req.workspace.customerId, run.id)))
     res.json({ ingestions:(data || []).map((run,index) => publicIngestion(run,revisions[index])) })
-  } catch(error) { res.status(error.status || 500).json({error:error.message || 'Unable to load image knowledge'}) }
+  } catch(error) { res.status(error.status || 500).json({error:error.message || 'Unable to load file knowledge'}) }
 })
 
 // Extraction is explicitly requested after upload; it never delays saving a file.
@@ -195,7 +195,7 @@ router.post('/:id/extract-document', requireAdmin, async (req, res) => {
 
 router.post('/:id/extract-knowledge', requireAdmin, async (req,res) => {
   try { res.status(201).json({ ingestion: await startExtraction(req, await ownedItem(req.workspace.customerId, req.params.id)) }) }
-  catch(error) { res.status(error.status || 400).json({ error:error.message || 'Unable to analyze this image' }) }
+  catch(error) { res.status(error.status || 400).json({ error:error.message || 'Unable to extract file knowledge' }) }
 })
 
 router.patch('/knowledge-ingestions/:ingestionId/review', requireAdmin, async (req,res) => {

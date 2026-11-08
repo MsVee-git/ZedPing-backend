@@ -26,7 +26,7 @@ test('delete preserves provenance and reports storage cleanup truthfully', () =>
   assert.match(source, /storage_cleanup: 'failed'/)
   assert.match(source, /storage_cleanup: 'complete'/)
   assert.match(source, /an activated AI knowledge snapshot/)
-  assert.match(source, /image knowledge history/)
+  assert.match(source, /file knowledge history/)
   assert.match(source, /a chatbot flow draft/)
   assert.match(source, /a chatbot flow version/)
 })
