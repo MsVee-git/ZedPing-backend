@@ -56,3 +56,30 @@ test('booking FAQs, changes and unrelated enquiries stay outside booking intake'
   assert.equal(commercialTurn(quotation, 'Please send me the menu', [], active.context), null)
   assert.equal(commercialTurn(quotation, 'Please quote me for catering.', [], active.context).reason, 'quotation_requested')
 })
+
+test('a generic booking and a compact guest count lead to a table handoff', () => {
+  const config = { ...quotation, booking_enabled:true }
+  const first = commercialTurn(config, 'No, I would like to make a booking', [], null)
+  assert.equal(first.reply, 'What would you like to book?')
+  const second = commercialTurn(config, '14 November, 7pm', [], first.context)
+  const third = commercialTurn(config, '3guests', [], second.context)
+  assert.equal(third.context.pending_field, 'name')
+  const last = commercialTurn(config, 'Chika', [], third.context)
+  assert.equal(last.reason, 'booking_requested')
+  assert.deepEqual(commercialMetadata(last.context).collected, {date:'14 November',time:'7pm',party_size:'3',name:'Chika'})
+})
+
+test('a generic request can become an appointment and the booking toggle is independent', () => {
+  const first = commercialTurn({}, 'Can I book?', [], null)
+  const second = commercialTurn({}, 'An appointment for a haircut', [], first.context)
+  assert.equal(second.context.booking_type, 'appointment')
+  assert.equal(second.context.collected.service, 'a haircut')
+  assert.equal(second.context.pending_field, 'date')
+  const disabled = { ...quotation, booking_enabled:false }
+  assert.equal(commercialTurn(disabled, request, [], null), null)
+  assert.equal(commercialTurn(disabled, 'Can I make a booking?', [], null), null)
+  assert.equal(commercialTurn(disabled, 'Please quote me for catering.', [], null).reason, 'quotation_requested')
+  for (const message of ['How do I make a booking?', 'I do not want to make a booking.', 'I want to buy a book.']) {
+    assert.equal(commercialTurn({}, message, [], null), null, message)
+  }
+})

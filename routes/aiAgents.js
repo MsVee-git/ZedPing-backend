@@ -34,7 +34,8 @@ const TEMPLATES = [
   { key:'autoguard_service', title:'Vehicle service information', role:'Suitable for service businesses such as AutoGuard. Helps customers understand approved services.', can:'Approved service information', handoff:'Quotes, bookings or service requests', unavailable:'Confirmed bookings, prices unless approved, and live availability' },
   { key:'school_information', title:'School information', role:'Suitable for schools. Answers approved admissions, fees, term and requirements questions.', can:'Approved school information', handoff:'Admissions follow-up or information not in approved knowledge', unavailable:'Applications, enrolment decisions and payment actions' },
   { key:'product_information', title:'Product information', role:'Answers approved product information.', can:'Selected product information', handoff:'Live stock, pricing or purchasing questions', unavailable:'Live stock, orders and payments' },
-  { key:'static_availability', title:'Service availability information', role:'Shares static approved availability information only.', can:'Static hours and availability information', handoff:'Booking or live availability requests', unavailable:'Booking appointments or confirming availability' }
+  { key:'static_availability', title:'Service availability information', role:'Shares static approved availability information only.', can:'Static hours and availability information', handoff:'Booking or live availability requests', unavailable:'Booking appointments or confirming availability' },
+  { key:'appointment_reservations', title:'Appointments and reservations', role:'Collects appointment or table reservation requests on WhatsApp.', can:'Preferred date and time, booking name, and service or guest count', handoff:'Completed requests for your team to check and confirm', unavailable:'Checking live availability or confirming a booking', booking_enabled:true }
 ]
 const TYPES = new Set(['support', 'sales', 'booking'])
 
@@ -110,7 +111,7 @@ async function selectedKnowledge(customerId, ids) {
   if(items.length !== unique.length) throw new Error('Every knowledge item must be active approved knowledge from this workspace')
   return items
 }
-async function readConfig(body, customerId) {
+async function readConfig(body, customerId, previousConfiguration = null) {
   const template = templateFor(cleanText(body?.template_key, 'Template', 80, true))
   const name = cleanText(body?.assistant_name, 'Assistant name', 160, true)
   const style = String(body?.communication_style || 'professional').toLowerCase()
@@ -119,10 +120,12 @@ async function readConfig(body, customerId) {
   const phrases = Array.isArray(handoff.phrases) ? [...new Set(handoff.phrases.map(value => cleanText(value, 'Escalation phrase', 100)).filter(Boolean))].slice(0, 5) : []
   const handoffBusinessName = cleanText(handoff.business_name, 'Handoff business name', 160)
   const commercialAction = normaliseCommercialAction(body?.commercial_action)
+  if (body?.booking_enabled !== undefined && typeof body.booking_enabled !== 'boolean') throw new Error('Appointment and reservation setting is invalid')
+  const bookingEnabled = body?.booking_enabled ?? (previousConfiguration ? previousConfiguration.booking_enabled !== false : template.booking_enabled === true)
   const attachmentIds = Array.isArray(body?.shareable_content_item_ids) ? body.shareable_content_item_ids : []
   const attachments = await resolveAttachments(supabase, customerId, attachmentIds)
-  return { template, name, agentType:TYPES.has(body?.agent_type) ? body.agent_type : (template.key === 'sales_interest' ? 'sales' : template.key === 'static_availability' ? 'booking' : 'support'),
-    configuration:{ communication_style:style, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases, ...(handoffBusinessName ? { business_name:handoffBusinessName } : {}) }, ...(commercialAction ? { commercial_action:commercialAction } : {}), shareable_content_item_ids:attachments.map(item => item.id), shareable_attachments:attachments, knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
+  return { template, name, agentType:TYPES.has(body?.agent_type) ? body.agent_type : (template.key === 'sales_interest' ? 'sales' : template.booking_enabled || template.key === 'static_availability' ? 'booking' : 'support'),
+    configuration:{ communication_style:style, booking_enabled:bookingEnabled, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases, ...(handoffBusinessName ? { business_name:handoffBusinessName } : {}) }, ...(commercialAction ? { commercial_action:commercialAction } : {}), shareable_content_item_ids:attachments.map(item => item.id), shareable_attachments:attachments, knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
 }
 function buildSystem(agent, knowledge, question, history = []) {
   return buildLiveSystem(agent, { configuration:activatedConfiguration(agent), knowledge_snapshot:knowledgeSnapshot(knowledge) }, question, history).prompt
@@ -235,7 +238,7 @@ router.patch('/:id/draft', requireAdmin, async (req,res) => {
   try {
     const current = await agentForWorkspace(req.workspace.customerId, req.params.id)
     if (!['draft','paused','active'].includes(current.lifecycle_status)) throw new Error('Only a draft, paused, or active AI Agent can be edited')
-    const input = await readConfig(req.body, req.workspace.customerId)
+    const input = await readConfig(req.body, req.workspace.customerId, current.zoe_configuration || {})
     if (current.zoe_configuration?.followups?.enabled === true) input.configuration.followups = current.zoe_configuration.followups
     const number = await workspaceNumber(req.workspace.customerId, req.body?.whatsapp_number_id || current.whatsapp_number_id)
     // Live routing selects an agent by its bound number before loading the
