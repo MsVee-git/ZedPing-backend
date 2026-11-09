@@ -15,6 +15,7 @@ const MAX_KNOWLEDGE_ITEMS = 10
 const MAX_KNOWLEDGE_ITEM_CHARS = 3000
 const MAX_KNOWLEDGE_CONTEXT_CHARS = 10000
 const MAX_TEST_MESSAGES = 12
+const MAX_AGENT_INSTRUCTIONS_CHARS = 2000
 const STYLES = new Set(['professional', 'friendly', 'warm', 'concise'])
 const ACTIVATION_SAFE_FAILURES = [
   [/^Select no more than \d+ approved knowledge items$/, 'knowledge_limit', 'This draft has more approved knowledge sources than the current limit. Remove a source before updating Live.'],
@@ -116,6 +117,9 @@ async function readConfig(body, customerId, previousConfiguration = null) {
   const name = cleanText(body?.assistant_name, 'Assistant name', 160, true)
   const style = String(body?.communication_style || 'professional').toLowerCase()
   if (!STYLES.has(style)) throw new Error('Communication style is invalid')
+  const instructions = body?.agent_instructions === undefined
+    ? previousConfiguration?.agent_instructions
+    : cleanText(body.agent_instructions, 'Agent instruction text', MAX_AGENT_INSTRUCTIONS_CHARS)
   const handoff = body?.handoff && typeof body.handoff === 'object' && !Array.isArray(body.handoff) ? body.handoff : {}
   const phrases = Array.isArray(handoff.phrases) ? [...new Set(handoff.phrases.map(value => cleanText(value, 'Escalation phrase', 100)).filter(Boolean))].slice(0, 5) : []
   const handoffBusinessName = cleanText(handoff.business_name, 'Handoff business name', 160)
@@ -125,7 +129,7 @@ async function readConfig(body, customerId, previousConfiguration = null) {
   const attachmentIds = Array.isArray(body?.shareable_content_item_ids) ? body.shareable_content_item_ids : []
   const attachments = await resolveAttachments(supabase, customerId, attachmentIds)
   return { template, name, agentType:TYPES.has(body?.agent_type) ? body.agent_type : (template.key === 'sales_interest' ? 'sales' : template.booking_enabled || template.key === 'static_availability' ? 'booking' : 'support'),
-    configuration:{ communication_style:style, booking_enabled:bookingEnabled, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases, ...(handoffBusinessName ? { business_name:handoffBusinessName } : {}) }, ...(commercialAction ? { commercial_action:commercialAction } : {}), shareable_content_item_ids:attachments.map(item => item.id), shareable_attachments:attachments, knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
+    configuration:{ communication_style:style, ...(instructions ? { agent_instructions:instructions } : {}), booking_enabled:bookingEnabled, handoff:{ person:handoff.person !== false, unknown:handoff.unknown !== false, quote_or_buy:handoff.quote_or_buy !== false, phrases, ...(handoffBusinessName ? { business_name:handoffBusinessName } : {}) }, ...(commercialAction ? { commercial_action:commercialAction } : {}), shareable_content_item_ids:attachments.map(item => item.id), shareable_attachments:attachments, knowledge_limits:{ max_items:MAX_KNOWLEDGE_ITEMS, max_item_chars:MAX_KNOWLEDGE_ITEM_CHARS, max_context_chars:MAX_KNOWLEDGE_CONTEXT_CHARS } } }
 }
 function buildSystem(agent, knowledge, question, history = []) {
   return buildLiveSystem(agent, { configuration:activatedConfiguration(agent), knowledge_snapshot:knowledgeSnapshot(knowledge) }, question, history).prompt
@@ -265,7 +269,8 @@ router.patch('/:id/draft', requireAdmin, async (req,res) => {
       /^Pause the active AI Agent before changing its WhatsApp number$/,
       /^Every knowledge item must be active approved knowledge from this workspace$/,
       /^Assistant name is (required|too long)$/,
-      /^Handoff business name is (invalid|too long)$/
+      /^Handoff business name is (invalid|too long)$/,
+      /^Agent instruction text is (invalid|too long)$/
     ].some(pattern => pattern.test(String(error?.message || '')))
     res.status(status).json({error:actionable ? error.message : "We couldn't save your changes. Please try again."})
   }
@@ -275,7 +280,7 @@ router.post('/:id/test', requireAdmin, async (req,res) => {
   let agent
   try {
     agent=await agentForWorkspace(req.workspace.customerId,req.params.id)
-    if (agent.lifecycle_status !== 'draft') throw new Error('Only draft AI Agents can be tested in this phase')
+    if (!['draft', 'paused', 'active'].includes(agent.lifecycle_status)) throw new Error('Only saved drafts for draft, paused, or active agents can be tested')
     const messages=boundedHistory(req.body?.messages || []).slice(-MAX_TEST_MESSAGES)
     if (!messages.length || messages[messages.length-1].role !== 'user') throw new Error('Enter a customer question to test this draft')
     const knowledge=await knowledgeForAgent(req.workspace.customerId,agent.id,true)
