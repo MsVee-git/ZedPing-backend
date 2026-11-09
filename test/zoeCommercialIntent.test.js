@@ -60,6 +60,31 @@ test('vague interest does not prematurely create a commercial state', () => {
   assert.equal(detectsCommercialIntent('I am interested in your services.', []), false)
 })
 
+test('vehicle assessment requests take precedence over stale quotation intake and quoted context', () => {
+  const previous = commercialTurn(config, 'Can you quote me?', [], null).context
+  for (const message of [
+    'I want to come in for a vehicle assessment',
+    'Can I bring my car in for an inspection?',
+    'I need a vehicle assessment',
+    'Can I book a vehicle inspection?',
+    'Can I come in for an assessment before you give me a quote?'
+  ]) {
+    const turn = commercialTurn(config, `Quoted message: Can we send you a quotation?\nCustomer message: ${message}`, [], previous, message)
+    assert.equal(turn.reason, 'assessment_requested', message)
+  }
+})
+
+test('assessment questions stay with the assistant and explicit quotation requests still reach the team', () => {
+  for (const message of [
+    'I want to know how much a vehicle assessment costs.',
+    'Do I need to book a vehicle inspection?',
+    'I do not want to come in for a vehicle assessment.'
+  ]) {
+    assert.equal(commercialTurn(config, message, [], null), null, message)
+  }
+  assert.equal(commercialTurn(config, 'Can I get a quotation for a vehicle assessment?', [], null).reason, 'quotation_requested')
+})
+
 test('one required detail is collected naturally and is not requested twice', () => {
   const required = {
     commercial_action: { type: 'quotation', qualification_fields: [{ key: 'product_or_service', required: true }, { key: 'vehicle_year', required: true }] }
