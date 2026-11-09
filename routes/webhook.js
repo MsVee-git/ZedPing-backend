@@ -460,7 +460,7 @@ async function transitionAiToHandoff(ctx, session, agent, reason, commercialCont
     assigned_user_id: null,
     handoff_reason: ['quotation_requested', 'booking_requested'].includes(reason)
       ? String(commercialContext?.handoff_reason || (reason === 'booking_requested' ? 'Booking requested' : 'Quotation requested')).trim().slice(0, 120)
-      : 'Requested by assistant',
+      : reason === 'assessment_requested' ? 'Vehicle assessment requested' : 'Requested by assistant',
     handoff_at: now,
     updated_at: now
   }).eq('id', ctx.conversation.id).eq('customer_id', ctx.customerId).select().maybeSingle()
@@ -537,7 +537,7 @@ async function runLiveAiTurn(ctx, session, agent, version) {
     }).catch(() => {})
     return true
   }
-  if (commercial?.kind === 'handoff') return handoff(commercial.reason, commercial.reply || handoffReply(commercial.reason, ctx.body), commercial.context)
+  if (commercial?.kind === 'handoff') return handoff(commercial.reason, commercial.reply ?? handoffReply(commercial.reason, ctx.body), commercial.context)
 
   const configured = configuredHandoff(live.configuration, ctx.body)
   if (configured) return handoff(configured, handoffReply(configured, ctx.body))

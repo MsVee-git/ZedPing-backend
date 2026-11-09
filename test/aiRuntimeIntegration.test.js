@@ -61,7 +61,7 @@ test('manual team control terminates active AI sessions', () => {
   assert.ok(source.includes("reason: 'manual_handoff'"))
 })
 
-test('a completed generic reservation moves to Needs Attention and pauses later AI replies', async () => {
+async function runHandoffConversation(configuration, messages) {
   const { commercialTurn, commercialMetadata } = require('../lib/zoeCommercial')
   const { buildLiveSystem, handoffConfirmation } = require('../lib/zoeGrounding')
   const { shouldSuppressAutomation } = require('../lib/conversationState')
@@ -71,7 +71,7 @@ test('a completed generic reservation moves to Needs Attention and pauses later 
   const conversation = { id:'conversation', status:'open', control_mode:'automation' }
   const session = { id:'session', messages:[], status:'active' }
   const agent = { id:'agent', name:'Assistant' }
-  const version = { configuration:{ configuration:{ booking_enabled:true, handoff:{business_name:'Demo Restaurant'} } }, knowledge_snapshot:[] }
+  const version = { configuration:{ configuration }, knowledge_snapshot:[] }
   const replies = [], handoffs = []
   let automationSkips = 0
   const query = {
@@ -93,7 +93,7 @@ test('a completed generic reservation moves to Needs Attention and pauses later 
   })
   vm.runInContext(route + '\n' + intake, scope)
   scope.checkAISession = async ctx=>scope.runLiveAiTurn(ctx, session, agent, version)
-  for (const body of ['No, I would like to make a booking', '14 November, 7pm', '3guests', 'Chika', 'Thank you']) {
+  for (const body of messages) {
     await scope.runInboundAutomation({ body, conversation, customerId:'workspace', number:{ id:'number' } })
   }
   assert.equal(conversation.status, 'needs_attention')
@@ -101,9 +101,27 @@ test('a completed generic reservation moves to Needs Attention and pauses later 
   assert.equal(conversation.assigned_user_id, null)
   assert.equal(session.status, 'closed')
   assert.equal(handoffs.length, 1)
+  assert.equal(automationSkips, 1)
+  return { conversation, handoffs, replies }
+}
+
+test('a completed generic reservation moves to Needs Attention and pauses later AI replies', async () => {
+  const { handoffs, replies } = await runHandoffConversation(
+    { booking_enabled:true, handoff:{business_name:'Demo Restaurant'} },
+    ['No, I would like to make a booking', '14 November, 7pm', '3guests', 'Chika', 'Thank you']
+  )
   assert.equal(handoffs[0].metadata.reason, 'booking_requested')
   assert.equal(handoffs[0].metadata.commercial_context.collected.party_size, '3')
   assert.equal(replies.length, 4)
   assert.match(replies.at(-1), /Demo Restaurant team will check availability/)
-  assert.equal(automationSkips, 1)
+})
+
+test('the live assessment request sends one assessment reply and labels the Team Inbox handoff', async () => {
+  const { conversation, handoffs, replies } = await runHandoffConversation(
+    { booking_enabled:false, handoff:{business_name:'Example Motors'}, commercial_action:{type:'quotation'} },
+    ['I want to come in for a vehicle assessment', 'Thank you']
+  )
+  assert.equal(handoffs[0].metadata.reason, 'assessment_requested')
+  assert.equal(conversation.handoff_reason, 'Vehicle assessment requested')
+  assert.deepEqual(replies, ['I’ll connect you with the Example Motors team here on WhatsApp to help arrange your vehicle assessment.'])
 })
