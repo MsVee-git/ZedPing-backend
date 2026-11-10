@@ -88,7 +88,7 @@ function signupAssetPatch(session, { phoneNumberId, finishWabaId, validatedWabaI
 }
 
 function isOperationalConnection(connection) {
-  return connection?.status === 'connected' || connection?.provisioning_state === 'operational'
+  return connection?.status === 'connected' || (connection?.status === 'provisioning' && connection.provisioning_state === 'operational')
 }
 
 function recoveryAction(connection, now = Date.now()) {
@@ -143,8 +143,8 @@ async function markSessionCompleted(session, customerId, connectionId) {
 
 async function findConflict(customerId, phoneNumberId, wabaId, phoneNumber) {
   const [{ data: byId }, { data: byWabaPhone }] = await Promise.all([
-    supabase.from('whatsapp_numbers').select('id, customer_id, phone_number_id, whatsapp_business_account_id, phone_number, display_name, status, provisioning_state, provisioning_error, provisioned_at, provisioning_attempts, provisioning_started_at, provisioning_claimed_at, provisioning_registration_attempted_at').eq('phone_number_id', phoneNumberId).maybeSingle(),
-    supabase.from('whatsapp_numbers').select('id, customer_id, phone_number_id, whatsapp_business_account_id, phone_number, display_name, status, provisioning_state, provisioning_error, provisioned_at, provisioning_attempts, provisioning_started_at, provisioning_claimed_at, provisioning_registration_attempted_at').eq('whatsapp_business_account_id', wabaId).eq('phone_number', phoneNumber).maybeSingle()
+    supabase.from('whatsapp_numbers').select('id, customer_id, phone_number_id, whatsapp_business_account_id, phone_number, display_name, status, disconnected_at, provisioning_state, provisioning_error, provisioned_at, provisioning_attempts, provisioning_started_at, provisioning_claimed_at, provisioning_registration_attempted_at').eq('phone_number_id', phoneNumberId).maybeSingle(),
+    supabase.from('whatsapp_numbers').select('id, customer_id, phone_number_id, whatsapp_business_account_id, phone_number, display_name, status, disconnected_at, provisioning_state, provisioning_error, provisioned_at, provisioning_attempts, provisioning_started_at, provisioning_claimed_at, provisioning_registration_attempted_at').eq('whatsapp_business_account_id', wabaId).eq('phone_number', phoneNumber).maybeSingle()
   ])
   const records = [byId, byWabaPhone].filter(Boolean)
   const foreign = records.find((record) => record.customer_id !== customerId)
@@ -155,6 +155,29 @@ async function findConflict(customerId, phoneNumberId, wabaId, phoneNumber) {
   }
   return { kind: 'same', record: existing || null }
 }
+
+router.post('/:id/disconnect', requireAdmin, async (req, res) => {
+  res.set('Cache-Control', 'no-store')
+  if (!validId(req.params.id)) return res.status(400).json({ error: 'Invalid WhatsApp connection' })
+  try {
+    const customerId = req.workspace.customerId
+    const { data, error } = await supabase.from('whatsapp_numbers')
+      .update({ status:'disconnected', disconnected_at:new Date().toISOString() })
+      .eq('id', req.params.id).eq('customer_id', customerId).eq('status', 'connected')
+      .select('id').maybeSingle()
+    if (error) throw error
+    if (!data) {
+      const { data: existing, error: readError } = await supabase.from('whatsapp_numbers')
+        .select('status').eq('id', req.params.id).eq('customer_id', customerId).maybeSingle()
+      if (readError) throw readError
+      if (!existing) return res.status(404).json({ error: 'WhatsApp connection not found' })
+      if (existing.status !== 'disconnected') return res.status(409).json({ error: 'Wait for WhatsApp setup to finish before disconnecting' })
+    }
+    return res.json({ status:'disconnected' })
+  } catch {
+    return res.status(503).json({ error: 'Unable to disconnect WhatsApp. Please check the connection and try again.' })
+  }
+})
 
 router.post('/embedded-signup/prepare', requireAdmin, async (req, res) => {
   if (!req.workspace.emailVerified) return res.status(403).json({ error: 'Verify your email before connecting WhatsApp' })
@@ -193,7 +216,7 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
     const { session_id: sessionId, state, code, phone_number_id: phoneNumberId, finish_waba_id: finishWabaId } = req.body
     const { data: session } = await supabase
       .from('whatsapp_connection_sessions')
-      .select('id, customer_id, created_by, state_hash, expires_at, completed_at, whatsapp_number_id, signup_phone_number_id, signup_waba_id, onboarding_provider')
+      .select('id, customer_id, created_by, state_hash, created_at, expires_at, completed_at, whatsapp_number_id, signup_phone_number_id, signup_waba_id, onboarding_provider')
       .eq('id', sessionId)
       .maybeSingle()
 
@@ -207,7 +230,7 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
     }
     if (session.completed_at) {
       const connection = await loadCompletedConnection(session, req.workspace.customerId)
-      if (!connection) return res.status(409).json({ error: 'This connection session is no longer valid' })
+      if (!connection || connection.status === 'disconnected') return res.status(409).json({ error: 'This connection session is no longer valid. Start again.' })
       return res.json({ connection, idempotent: true })
     }
     if (new Date(session.expires_at).getTime() <= Date.now() && !(session.signup_phone_number_id && session.signup_waba_id)) {
@@ -279,6 +302,26 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
         throw error
       }
       connection = data
+    }
+
+    if (connection.status === 'disconnected' && connection.disconnected_at) {
+      if (!(Date.parse(session.created_at) > Date.parse(connection.disconnected_at))) {
+        return res.status(409).json({ error: 'This connection session is no longer valid. Start again.' })
+      }
+      const customerId = req.workspace.customerId
+      const mapping = await createGupshupConnectionStore(supabase).load({ customerId, connectionId:connection.id })
+      if (mapping ? mapping.link_state !== 'linked' || !mapping.app_id : !(await meta.getRegistrationStatus(validated.phoneNumberId, temporaryToken)).connected) {
+        return res.status(409).json({ error: 'Your WhatsApp provider connection needs attention before it can be reconnected.' })
+      }
+      if (!mapping) await vault.put({ customerId, integration:'meta_whatsapp', credentialKey:`phone_${validated.phoneNumberId}`, plaintext:temporaryToken })
+      const { data: reconnected, error } = await supabase.from('whatsapp_numbers')
+        .update({ status:'connected', provisioning_state:'operational', provisioning_error:null })
+        .eq('id', connection.id).eq('customer_id', customerId).eq('status', 'disconnected').eq('disconnected_at', connection.disconnected_at)
+        .select('id, customer_id, phone_number, phone_number_id, whatsapp_business_account_id, display_name, status, provisioning_state, provisioning_error, provisioned_at').maybeSingle()
+      if (error) throw error
+      if (!reconnected) return res.status(409).json({ error: 'The WhatsApp connection changed. Refresh and try again.' })
+      await markSessionCompleted(session, customerId, reconnected.id)
+      return res.json({ connection:provisioningView(reconnected) })
     }
 
     // Legacy and already-operational connections are never reprovisioned by a
@@ -391,7 +434,7 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
       await meta.registerPhone(validated.phoneNumberId, temporaryToken, registrationPin)
       }
       registrationConfirmed = true
-      const { data: operational, error: operationalError } = await supabase.from('whatsapp_numbers').update({ status: 'connected', provisioning_state: 'operational', provisioning_error: null, provisioned_at: new Date().toISOString() }).eq('id', connection.id).eq('customer_id', req.workspace.customerId).select('id, customer_id, phone_number, phone_number_id, whatsapp_business_account_id, display_name, status, provisioning_state, provisioning_error, provisioned_at').single()
+      const { data: operational, error: operationalError } = await supabase.from('whatsapp_numbers').update({ status: 'connected', provisioning_state: 'operational', provisioning_error: null, provisioned_at: new Date().toISOString() }).eq('id', connection.id).eq('customer_id', req.workspace.customerId).eq('status', 'provisioning').select('id, customer_id, phone_number, phone_number_id, whatsapp_business_account_id, display_name, status, provisioning_state, provisioning_error, provisioned_at').single()
       if (operationalError) throw operationalError
       connection = operational
       await supabase.from('customers').update({ whatsapp_connected_at: new Date().toISOString() }).eq('id', req.workspace.customerId).is('whatsapp_connected_at', null)
@@ -403,7 +446,7 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
         status: 'provisioning',
         provisioning_state: failure.state,
         provisioning_error: failure.error
-      }).eq('id', connection.id).eq('customer_id', req.workspace.customerId)
+      }).eq('id', connection.id).eq('customer_id', req.workspace.customerId).eq('status', 'provisioning')
       emitPersistenceReady(false, error)
       return res.status(422).json({ error: failure.state === 'registration_confirmation_required' ? 'WhatsApp registration needs confirmation before another attempt.' : 'WhatsApp provisioning needs attention. You can retry safely.', connection: { ...provisioningView(connection), status: 'provisioning', provisioning_state: failure.state, provisioning_error: failure.error } })
     }
@@ -428,6 +471,7 @@ router.post('/:id/provision/status', requireAdmin, async(req,res)=>{
   try {
     const connection=await loadConnection(req.params.id,req.workspace.customerId)
     if(!connection)return res.status(404).json({error:'Connection not found'})
+    if(connection.status==='disconnected')return res.status(409).json({error:'This WhatsApp number is disconnected'})
     if(connection.status==='connected')return res.json({phase:'complete',connection:provisioningView(connection)})
     const key=`${req.workspace.customerId}:${connection.id}`
     if(!reconciliationInFlight.has(key)){
@@ -505,13 +549,13 @@ router.post('/:id/provision/retry', requireAdmin, async (req, res) => {
       await meta.registerPhone(connection.phone_number_id, token, registrationPin)
       }
       registrationConfirmed = true
-      const { data: operational, error: operationalError } = await supabase.from('whatsapp_numbers').update({ status: 'connected', provisioning_state: 'operational', provisioning_error: null, provisioned_at: new Date().toISOString() }).eq('id', connection.id).eq('customer_id', req.workspace.customerId).select('id, customer_id, phone_number, phone_number_id, whatsapp_business_account_id, display_name, status, provisioning_state, provisioning_error, provisioned_at').single()
+      const { data: operational, error: operationalError } = await supabase.from('whatsapp_numbers').update({ status: 'connected', provisioning_state: 'operational', provisioning_error: null, provisioned_at: new Date().toISOString() }).eq('id', connection.id).eq('customer_id', req.workspace.customerId).eq('status', 'provisioning').select('id, customer_id, phone_number, phone_number_id, whatsapp_business_account_id, display_name, status, provisioning_state, provisioning_error, provisioned_at').single()
       if (operationalError) throw operationalError
       await supabase.from('customers').update({ whatsapp_connected_at: new Date().toISOString() }).eq('id', req.workspace.customerId).is('whatsapp_connected_at', null)
       return res.json({ connection: provisioningView(operational) })
     } catch (retryError) {
       const failure = failedProvisioningState({ registrationSubmitted, registrationConfirmed, error: retryError })
-      await supabase.from('whatsapp_numbers').update({ status: 'provisioning', provisioning_state: failure.state, provisioning_error: failure.error }).eq('id', connection.id).eq('customer_id', req.workspace.customerId)
+      await supabase.from('whatsapp_numbers').update({ status: 'provisioning', provisioning_state: failure.state, provisioning_error: failure.error }).eq('id', connection.id).eq('customer_id', req.workspace.customerId).eq('status', 'provisioning')
       return res.status(422).json({ error: failure.state === 'registration_confirmation_required' ? 'WhatsApp registration needs confirmation before another attempt.' : 'WhatsApp provisioning needs attention. You can retry safely.' })
     }
   } catch (error) {

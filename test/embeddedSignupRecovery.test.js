@@ -20,6 +20,99 @@ test('existing operational connections are recognized as idempotent and are neve
   assert.equal(isOperationalConnection({ status: 'connected', provisioning_state: null }), true)
   assert.equal(isOperationalConnection({ status: 'provisioning', provisioning_state: 'operational' }), true)
   assert.equal(isOperationalConnection({ status: 'provisioning', provisioning_state: 'failed' }), false)
+  assert.equal(isOperationalConnection({ status: 'disconnected', provisioning_state: 'operational' }), false)
+})
+
+test('disconnect is manager-only, workspace-scoped, and keeps the row on retry', async t => {
+  const db = require('../lib/supabase')
+  const router = require('../routes/whatsappConnections')
+  const route = router.stack.find(layer => layer.route?.path === '/:id/disconnect').route
+  const id = '22222222-2222-4222-8222-222222222222'
+  const number = { id, customer_id:'workspace', status:'connected', provisioning_state:'operational' }
+  const original = db.from
+  let writes = 0
+  t.after(() => { db.from = original })
+  db.from = table => {
+    assert.equal(table, 'whatsapp_numbers')
+    const filters = {}
+    let patch
+    const query = {
+      select: () => query,
+      eq(key, value) { filters[key] = value; return query },
+      update(value) { patch = value; return query },
+      async maybeSingle() {
+        if (!Object.entries(filters).every(([key, value]) => number[key] === value)) return { data:null }
+        if (patch) { writes++; Object.assign(number, patch) }
+        return { data:number }
+      }
+    }
+    return query
+  }
+  async function request(role, customerId = 'workspace') {
+    const req = { params:{ id }, workspace:{ customerId, role } }
+    const res = { statusCode:200, set() {}, status(code) { this.statusCode = code; return this }, json(body) { this.body = body; return this } }
+    await route.stack[0].handle(req, res, () => route.stack[1].handle(req, res))
+    return res
+  }
+  assert.equal((await request('member')).statusCode, 403)
+  assert.equal((await request('owner', 'other-workspace')).statusCode, 404)
+  assert.equal(writes, 0)
+  assert.deepEqual((await request('admin')).body, { status:'disconnected' })
+  assert.equal(number.provisioning_state, 'operational')
+  assert.ok(Number.isFinite(Date.parse(number.disconnected_at)))
+  assert.equal((await request('owner')).statusCode, 200)
+  assert.equal(writes, 1)
+})
+
+test('only a signup started after disconnect can reactivate the verified connection', async () => {
+  const source = require('node:fs').readFileSync(require.resolve('../routes/whatsappConnections'), 'utf8')
+  const route = source.slice(source.indexOf("router.post('/embedded-signup/complete'"), source.indexOf('const reconciliationInFlight'))
+  const number = { id:'number', customer_id:'workspace', status:'disconnected', disconnected_at:'2026-11-10T10:00:00Z' }
+  const session = { id:'session', customer_id:'workspace', created_by:'admin', expires_at:new Date(Date.now() + 60_000).toISOString() }
+  let handler, ownershipChecks = 0, readinessChecks = 0
+  const vm = require('node:vm')
+  vm.runInNewContext(route, {
+    router:{ post(_path, _admin, callback) { handler = callback } }, requireAdmin() {},
+    invalidCompletionBody: () => null, safeEqual: () => true, stateHash: () => '',
+    signupAssetPatch: () => ({}), loadOrExchangeSignupToken: async () => ({ token:'temporary' }),
+    createCredentialVault: () => ({ put:async () => {} }),
+    createMetaEmbeddedSignupClient: () => ({
+      validatePhoneOwnership:async () => { ownershipChecks++; return { phoneNumberId:'123456', wabaId:'654321' } },
+      getRegistrationStatus:async () => { readinessChecks++; return { connected:true } }
+    }),
+    findConflict: async () => ({ kind:'same', record:number }),
+    createGupshupConnectionStore: () => ({ load:async () => null }),
+    markSessionCompleted: async () => {}, provisioningView: row => row,
+    supabase:{ from(table) {
+      const filters = {}
+      let patch
+      const query = { select:() => query, is:() => query, eq(key, value) { filters[key] = value; return query },
+        update(value) { patch = value; return query },
+        async maybeSingle() {
+          if (table === 'whatsapp_connection_sessions') return { data:session }
+          assert.equal(filters.customer_id, 'workspace')
+          assert.equal(filters.status, 'disconnected')
+          assert.equal(filters.disconnected_at, number.disconnected_at)
+          Object.assign(number, patch)
+          return { data:number }
+        }
+      }
+      return query
+    } }
+  })
+  async function complete(createdAt) {
+    session.created_at = createdAt
+    const req = { body:{}, workspace:{ customerId:'workspace', userId:'admin', emailVerified:true } }
+    const res = { statusCode:200, status(code) { this.statusCode = code; return this }, json(body) { this.body = body; return this } }
+    await handler(req, res)
+    return res
+  }
+  assert.equal((await complete('2026-11-10T09:59:00Z')).statusCode, 409)
+  assert.equal(number.status, 'disconnected')
+  assert.equal(readinessChecks, 0)
+  assert.equal((await complete('2026-11-10T10:01:00Z')).body.connection.status, 'connected')
+  assert.equal(ownershipChecks, 2)
+  assert.equal(readinessChecks, 1)
 })
 
 test('retains an exchanged signup token in the vault so later ownership recovery does not reuse an authorization code', async () => {
