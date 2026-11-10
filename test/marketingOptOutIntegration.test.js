@@ -91,7 +91,7 @@ function loadRoute(file, db) {
     '../lib/replyContext': { parseInboundReplyContext() { return null }, aiReplyContext() { return null } },
     '../lib/inboundMedia': { parseInboundMedia(message) { return { body: message?.text?.body || '', media: null } } }
   }
-  const real = new Set(['../lib/whatsappAdReferral', 'crypto', '../lib/marketingOptOut', '../lib/broadcastRecipients', '../lib/broadcastTemplates', '../lib/metaTemplates', '../lib/contactImport', '../lib/conversationState', '../lib/inboundWebhookEvents', '../lib/groupAudience', '../lib/deliveryMetrics', '../lib/templateMedia', '../lib/contentLibraryAttachments'])
+  const real = new Set(['../lib/whatsappAdReferral', 'crypto', '../lib/marketingOptOut', '../lib/broadcastRecipients', '../lib/broadcastTemplates', '../lib/metaTemplates', '../lib/contactImport', '../lib/conversationState', '../lib/inboundWebhookEvents', '../lib/groupAudience', '../lib/deliveryMetrics', '../lib/broadcastRetry', '../lib/templateMedia', '../lib/contentLibraryAttachments'])
   const context = {
     module: { exports: {} }, Buffer, process: { env: {} }, console,
     require(id) { if (id in stubs) return stubs[id]; if (real.has(id)) return localRequire(id); throw new Error(`Unexpected dependency ${id}`) },
