@@ -89,6 +89,14 @@ test('bot replies cannot send or persist when the signup credential is missing',
   } finally { axios.post = original }
 })
 
+test('a cached connected number cannot submit a message after disconnect', async () => {
+  const db = database({ ...number, status: 'disconnected' })
+  const send = async () => assert.fail('disconnected number must not submit')
+  const shared = runtime(db, async () => assert.fail('disconnected number must not load credentials'), { sendTextMessage: send, sendTemplateMessage: send })
+  await assert.rejects(shared.sendWorkspaceText({ number, customerId: customer }), /connection is unavailable/)
+  await assert.rejects(shared.sendWorkspaceTemplate({ number, customerId: customer }), /connection is unavailable/)
+})
+
 test('direct messaging route uses client credentials and returns no token', async () => {
   const db = database()
   const sends = []
@@ -142,7 +150,7 @@ for (const mode of ['plain', 'template']) {
       let lookups = 0, handler
       const recipients = [{ phone_number: '260700000000' }, { phone_number: '260700000001' }]
       const db = { from(table) {
-        const q = { insert(value) { writes.push({ table, value }); return q }, select() { return q }, single: async () => ({ data: { id: 'activity' }, error: null }), update(value) { writes.push({table,update:value}); return q }, eq() { return q }, then(resolve, reject) { return Promise.resolve({ error: null }).then(resolve, reject) } }
+        const q = { insert(value) { writes.push({ table, value }); return q }, select() { return q }, single: async () => ({ data: { id: 'activity' }, error: null }), maybeSingle: async () => ({ data: table === 'whatsapp_numbers' ? { id: number.id } : null, error: null }), update(value) { writes.push({table,update:value}); return q }, eq() { return q }, then(resolve, reject) { return Promise.resolve({ error: null }).then(resolve, reject) } }
         return q
       } }
       const transport={sendTextMessage:async(...args)=>{sends.push(args);return {messages:[{id:'accepted-text'}]}},sendTemplateMessage:async(...args)=>{sends.push(args);return {messages:[{id:'accepted-template'}]}}};

@@ -37,12 +37,12 @@ function cleanText(value, label, { min = 1, max = 160, email = false } = {}) {
   return email ? cleaned.toLowerCase() : cleaned
 }
 
-function onboardingFor(workspace, emailVerified) {
+function onboardingFor(workspace, emailVerified, whatsappConnected = Boolean(workspace.whatsapp_connected_at)) {
   return {
     account_complete: true,
     email_verified: Boolean(emailVerified),
     business_profile_complete: Boolean(workspace.profile_completed_at),
-    whatsapp_connected: Boolean(workspace.whatsapp_connected_at),
+    whatsapp_connected: whatsappConnected,
     onboarding_complete: workspace.onboarding_status === 'complete',
     status: workspace.onboarding_status
   }
@@ -105,7 +105,8 @@ async function loadWhatsAppConnection(customerId) {
 
   // The customer UI supports one number today. It receives only display-safe
   // connection data and its workspace-scoped row ID; credentials stay server-side.
-  return (data || []).find((number) => number.status === 'connected') || (data || [])[0] || null
+  const numbers = data || []
+  return numbers.find(number => number.status === 'connected') || numbers.find(number => number.status === 'provisioning') || numbers[0] || null
 }
 
 
@@ -149,7 +150,7 @@ router.get('/', async (req, res) => {
     return res.json({
       workspace,
       role: req.workspace.role,
-      onboarding: onboardingFor(workspace, req.workspace.emailVerified),
+      onboarding: onboardingFor(workspace, req.workspace.emailVerified, whatsappConnection?.status === 'connected'),
       whatsapp_connection: whatsappConnection,
       discovery,
       recommendations: recommendationsFor({ industry: workspace.industry, goals: discovery?.goals || [] }),

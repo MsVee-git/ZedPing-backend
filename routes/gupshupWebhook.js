@@ -39,8 +39,9 @@ function createGupshupWebhookRouter({ db, webhookSecret }) {
         const statuses = (change.value?.statuses || []).filter(s=>s.type!=='set-callback');
         await persistDeliveryStatuses(db,statuses,result.data,'gupshup');
       }
-      await persistGupshupEvents(db, mapping, events)
-      const count = events.filter(event=>event.event_type==='message').length
+      const activeEvents = result.data.status === 'disconnected' ? events.filter(event=>event.event_type==='status') : events
+      await persistGupshupEvents(db, mapping, activeEvents)
+      const count = activeEvents.filter(event=>event.event_type==='message').length
       if (count) console.info(JSON.stringify({event:'whatsapp_inbound_path',source:'gupshup',field:'messages',connection_id:result.data.id,count}))
       return res.status(200).end()
     } catch {
