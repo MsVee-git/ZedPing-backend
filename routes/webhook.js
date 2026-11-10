@@ -516,9 +516,14 @@ async function updateLiveSession(ctx, session, { messages, commercialContext }) 
 
 async function runLiveAiTurn(ctx, session, agent, version) {
   const quotedContext = aiReplyContext(ctx.replyToMessage)
-  const adContext=adReferralContext(ctx.adReferral)
-  const customerTurn = adContext || quotedContext ? [adContext,quotedContext,`Customer message:\n${ctx.body}`].filter(Boolean).join('\n\n') : ctx.body
-  const live = buildLiveSystem(agent, version, customerTurn, session.messages || [], ctx.body)
+  const adContext = adReferralContext(ctx.adReferral)
+  const fromAd = ctx.adReferral?.source_type === 'ad' && Boolean(adContext)
+  const customerMessage = `Customer message:\n${ctx.body}`
+  // The history limit must not let long ad copy crowd out the actual question.
+  const customerTurn = adContext
+    ? [customerMessage, adContext, quotedContext].filter(Boolean).join('\n\n')
+    : quotedContext ? [quotedContext, customerMessage].join('\n\n') : ctx.body
+  const live = buildLiveSystem(agent, version, customerTurn, session.messages || [], ctx.body, { fromAd })
   let handoffStarted = false
   const handoff = async (reason, reply, commercialContext = null) => {
     handoffStarted = true
