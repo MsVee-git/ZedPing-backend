@@ -136,8 +136,8 @@ for (const mode of ['plain', 'template']) {
   for (const missing of [false, true]) {
     test(`${mode} broadcast ${missing ? 'records submission failures without sending when credentials are missing' : 'uses the client credential for every recipient'}`, async () => {
       const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'broadcasts.js'), 'utf8')
-      const marker = mode === 'plain' ? "router.post('/send'," : "router.post('/send-template',"
-      const end = mode === 'plain' ? "router.get('/scheduled'" : "router.post('/send',"
+      const marker = mode === 'plain' ? "router.post('/send'," : "async function sendTemplateBroadcast"
+      const end = mode === 'plain' ? "router.get('/scheduled'" : "router.post('/scheduled/:id/cancel',"
       const writes = [], sends = []
       let lookups = 0, handler
       const recipients = [{ phone_number: '260700000000' }, { phone_number: '260700000001' }]
@@ -155,6 +155,7 @@ for (const mode of ['plain', 'template']) {
         filterWorkspaceMarketingRecipients: async () => ({ eligible: recipients, optedOut: [] }),
         templateReview: async () => ({ number, template: { name: 'welcome', language: 'en' }, eligible_recipients: 2, recipients, opted_out_recipients: 0 }),
         renderedTemplatePreview: () => 'Welcome',
+        rejectionCode: require('../lib/broadcastRetry').rejectionCode,
         fail: (res) => res.status(502).json({ error: 'unavailable' })
       }
       vm.runInNewContext(source.slice(source.indexOf(marker), source.indexOf(end)), sandbox)
