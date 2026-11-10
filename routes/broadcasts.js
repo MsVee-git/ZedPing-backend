@@ -1,5 +1,5 @@
 const { loadGroupLinks, loadWorkspaceContacts, loadAllWorkspaceContacts } = require('../lib/groupAudience')
-const { initialDelivery, addDelivery } = require('../lib/deliveryMetrics')
+const { campaignMessages, recipientReport, rejectionCode, retryCampaignMessage, legacyTemplateIdentity } = require('../lib/broadcastRetry')
 const { sendWorkspaceText, sendWorkspaceTemplate, uploadWorkspaceMedia } = require('../lib/whatsappRuntime')
 const multer = require('multer')
 const { validateTemplateHeaderMedia } = require('../lib/templateMedia')
@@ -19,7 +19,7 @@ const router = express.Router()
 const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
 const { sendTextMessage, sendTemplateMessage, uploadWhatsAppMedia } = require('../lib/whatsapp')
-const { transientRecipient, dedupeRecipients } = require('../lib/broadcastRecipients')
+const { transientRecipient, dedupeRecipients, normalizePhone } = require('../lib/broadcastRecipients')
 const { loadWorkspaceTemplates } = require('../lib/workspaceTemplates')
 const { describeTemplate, resolveTemplateRecipients, renderedTemplatePreview } = require('../lib/broadcastTemplates')
 const { MetaTemplateError } = require('../lib/metaTemplates')
@@ -184,14 +184,26 @@ async function sendTemplateBroadcast(req, res) {
         total_recipients: review.recipients.length, opted_out_recipients: review.opted_out_recipients })
     }
     for (const recipient of review.recipients) {
-      try {
-        const metaResult = await sendWorkspaceTemplate({number:review.number,customerId:req.workspace.customerId,to:recipient.phone_number,category:review.template.category,template:{ name: review.template.name, language: review.template.language, components: recipient.template_components, ...(mediaId ? { headerMedia: { type: mediaType, id: mediaId } } : {}) }})
-        await supabase.from('messages').insert({ customer_id: req.workspace.customerId, whatsapp_number_id: review.number.id, direction: 'outbound', to_number: recipient.phone_number, message_body: renderedTemplatePreview(review.template, recipient.template_components), status: 'accepted', broadcast_id: activity.id, meta_message_id: metaResult?.messages?.[0]?.id || null, contact_id: recipient.id || null })
-        results.push({ status: 'sent' })
-      } catch (_) {
-        await supabase.from('messages').insert({customer_id:req.workspace.customerId,whatsapp_number_id:review.number.id,direction:'outbound',broadcast_id:activity.id,to_number:recipient.phone_number,status:'failed'})
-        results.push({ status: 'failed' })
+      const template = { name: review.template.name, language: review.template.language, components: recipient.template_components,
+        ...(mediaId ? { headerMedia: { type: mediaType, id: mediaId } } : {}) }
+      const record = {
+        customer_id: req.workspace.customerId, whatsapp_number_id: review.number.id, direction: 'outbound',
+        to_number: recipient.phone_number, message_body: renderedTemplatePreview(review.template, recipient.template_components),
+        broadcast_id: activity.id, contact_id: recipient.id || null,
+        broadcast_send_spec: { to: recipient.phone_number, template, category: review.template.category }
       }
+      let metaResult, rejected
+      try {
+        metaResult = await sendWorkspaceTemplate({number:review.number,customerId:req.workspace.customerId,to:recipient.phone_number,category:review.template.category,template})
+      } catch (error) {
+        rejected = { code: rejectionCode(error) }
+      }
+      const saved = await supabase.from('messages').insert({
+        ...record, status: rejected ? 'failed' : 'accepted', meta_message_id: metaResult?.messages?.[0]?.id || null,
+        broadcast_rejection_code: rejected?.code || null
+      })
+      if (saved.error) console.error('Broadcast message evidence could not be saved', { code: saved.error.code || null })
+      results.push({ status: rejected ? 'failed' : 'sent' })
       if (results.length % 5 === 0) {
         const acceptedSoFar = results.filter(item => item.status === 'sent').length
         try {
@@ -248,14 +260,24 @@ router.post('/send', requireAdmin, async (req, res) => {
     if (error) throw error
     const results = []
     for (const contact of marketing.eligible) {
-      try {
-        const metaResult = await sendWorkspaceText({number,customerId:req.workspace.customerId,to:contact.phone_number,body})
-        await supabase.from('messages').insert({ customer_id: req.workspace.customerId, whatsapp_number_id: number.id, direction: 'outbound', to_number: contact.phone_number, message_body: body, status: 'accepted', broadcast_id: activity.id, meta_message_id: metaResult?.messages?.[0]?.id || null, contact_id: contact.id || null })
-        results.push({ status: 'sent' })
-      } catch (_) {
-        await supabase.from('messages').insert({customer_id:req.workspace.customerId,whatsapp_number_id:number.id,direction:'outbound',broadcast_id:activity.id,to_number:contact.phone_number,status:'failed'})
-        results.push({ status: 'failed' })
+      const record = {
+        customer_id: req.workspace.customerId, whatsapp_number_id: number.id, direction: 'outbound',
+        to_number: contact.phone_number, message_body: body, broadcast_id: activity.id, contact_id: contact.id || null,
+        broadcast_send_spec: { to: contact.phone_number, body }
       }
+      let rejected
+      let metaResult
+      try {
+        metaResult = await sendWorkspaceText({number,customerId:req.workspace.customerId,to:contact.phone_number,body})
+      } catch (error) {
+        rejected = { code: rejectionCode(error) }
+      }
+      const saved = await supabase.from('messages').insert({
+        ...record, status: rejected ? 'failed' : 'accepted', meta_message_id: metaResult?.messages?.[0]?.id || null,
+        broadcast_rejection_code: rejected?.code || null
+      })
+      if (saved.error) console.error('Broadcast message evidence could not be saved', { code: saved.error.code || null })
+      results.push({ status: rejected ? 'failed' : 'sent' })
     }
     const accepted = results.filter((item) => item.status === 'sent').length
     const failed = results.length - accepted
@@ -270,41 +292,89 @@ router.get('/scheduled', async (req, res) => {
   res.json(data)
 })
 
-// Historical facts only: never join current contact consent or group membership.
+async function campaignFor(workspace, id) {
+  const { data, error } = await supabase.from('scheduled_broadcasts')
+    .select('id,broadcast_name,message,contacts,status,sent_count,failed_count,created_at,scheduled_at,completed_at,failure_reason')
+    .eq('id', id).eq('customer_id', workspace).maybeSingle()
+  if (error) throw error
+  return data
+}
+
+router.post('/scheduled/:id/retry-failed', requireAdmin, async (req, res) => {
+  const customerId = req.workspace.customerId
+  try {
+    const campaign = await campaignFor(customerId, req.params.id)
+    if (!campaign) return res.status(404).json({ error: 'Broadcast not found.' })
+    const rows = await campaignMessages(supabase, customerId, campaign.id)
+    const { failures } = recipientReport(rows, campaign)
+    const retryable = new Set(failures.filter(failure => failure.can_retry).map(failure => failure.id))
+    if (!retryable.size) return res.status(409).json({ error: 'There are no failed numbers eligible for retry.' })
+
+    const candidates = rows.filter(row => retryable.has(row.id))
+    const { eligible } = await filterWorkspaceMarketingRecipients(supabase, customerId,
+      candidates.map(row => ({ id: row.id, phone_number: row.to_number })))
+    const eligibleIds = new Set(eligible.map(row => row.id))
+    const contactIds = [...new Set(candidates.map(row => row.contact_id).filter(Boolean))]
+    const contacts = await loadWorkspaceContacts(supabase, customerId, contactIds, 'id,phone_number,marketing_opted_out')
+    const currentContacts = new Map(contacts.map(contact => [contact.id, contact]))
+    const connections = new Map()
+    const legacyTemplates = new Map()
+    const targets = []
+    for (const row of candidates) {
+      if (!eligibleIds.has(row.id)) continue
+      const contact = currentContacts.get(row.contact_id)
+      if (row.contact_id && (!contact || contact.marketing_opted_out || normalizePhone(contact.phone_number) !== normalizePhone(row.to_number))) continue
+      if (!connections.has(row.whatsapp_number_id)) connections.set(row.whatsapp_number_id, await numberFor(customerId, row.whatsapp_number_id))
+      const number = connections.get(row.whatsapp_number_id)
+      if (!number) continue
+      let spec = row.broadcast_send_spec
+      if (!spec) {
+        const identity = legacyTemplateIdentity(campaign.message)
+        if (!identity) spec = { body: campaign.message }
+        else {
+          if (!legacyTemplates.has(number.id)) {
+            const catalog = await loadWorkspaceTemplates(customerId, number.id)
+            const match = catalog.kind === 'ok' && catalog.templates.find(item => item.name === identity.name && item.language === identity.language)
+            legacyTemplates.set(number.id, match ? describeTemplate(match) : null)
+          }
+          const template = legacyTemplates.get(number.id)
+          if (!template?.sendable || template.variables.length || (template.header_media_type && template.header_media_type !== 'text')
+            || renderedTemplatePreview(template, []) !== row.message_body) continue
+          spec = { template: { ...identity, components: [] }, category: template.category }
+        }
+      }
+      targets.push({ row, number, spec })
+    }
+    if (!targets.length) return res.status(409).json({ error: 'No failed numbers can be retried with the current contact consent, connection or original template details.' })
+    res.status(202).json({ queued: targets.length, skipped: candidates.length - targets.length })
+    for (const { row, number, spec } of targets) {
+      const send = { number, customerId, to: row.to_number }
+      try {
+        await retryCampaignMessage(supabase, campaign, row, () => spec.template
+          ? sendWorkspaceTemplate({ ...send, template: spec.template, category: spec.category })
+          : sendWorkspaceText({ ...send, body: spec.body }))
+      } catch (error) {
+        console.error('Broadcast retry could not be recorded', { code: error?.code || null })
+      }
+    }
+  } catch (error) { fail(res, error) }
+})
+
 router.get('/scheduled/:id', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('scheduled_broadcasts')
-      .select('id,broadcast_name,message,contacts,status,sent_count,failed_count,created_at,scheduled_at,completed_at,failure_reason')
-      .eq('id', req.params.id).eq('customer_id', req.workspace.customerId).maybeSingle()
-    if (error) throw error
+    const workspace = req.workspace.customerId
+    const data = await campaignFor(workspace, req.params.id)
     if (!data) return res.status(404).json({ error: 'Broadcast not found.' })
     const { contacts, ...broadcast } = data
-    let delivery = null;
-    // Explicit campaign links only; no historical audience or text matching.
-    let cursor = null, total = 0;
-    while(true) {
-      let query = supabase.from('messages').select('id,direction,status,delivery_receipts')
-        .eq('customer_id',req.workspace.customerId).eq('broadcast_id',data.id).eq('direction','outbound')
-        .order('id',{ascending:true}).limit(500);
-      if(cursor)query=query.gt('id',cursor);
-      const page=await query;
-      if(page.error)throw page.error;
-      const rows=page.data||[];
-      if(!rows.length)break;
-      total+=rows.length;
-      if(total>250000)throw new Error('Campaign report too large');
-      if(!delivery)delivery={...initialDelivery(),linked_messages:0};
-      for(const row of rows){delivery.linked_messages++;addDelivery(delivery,row);}
-      const next=rows[rows.length-1].id;
-      if(!next||next===cursor)throw new Error('Campaign pagination did not advance');
-      cursor=next;
-    }
-    res.set('Cache-Control','no-store');
-    res.json({ ...broadcast, delivery, recorded_recipients: Array.isArray(contacts) ? contacts.length : null })
+    const rows = await campaignMessages(supabase, workspace, data.id)
+    const { delivery, failures, pending } = recipientReport(rows, data)
+    const canManage = ['owner', 'admin'].includes(req.workspace.role)
+    res.set('Cache-Control','no-store')
+    res.json({ ...broadcast, delivery, failed_recipients: canManage ? failures : undefined,
+      pending_recipients: canManage ? pending : undefined,
+      recorded_recipients: Array.isArray(contacts) ? contacts.length : null })
   } catch (_) { res.status(500).json({ error: 'Could not load broadcast details.' }) }
 })
 
 module.exports = router
 module.exports.sendTemplateBroadcast = sendTemplateBroadcast
-
-

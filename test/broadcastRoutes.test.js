@@ -37,6 +37,6 @@ test('template and plain broadcasts persist their accepted Meta message IDs for 
   const plainSend = source.slice(source.indexOf("router.post('/send',"), source.indexOf("router.get('/scheduled'"))
   assert.match(templateSend, /renderedTemplatePreview\(review\.template, recipient\.template_components\)/)
   assert.match(templateSend, /meta_message_id: metaResult\?\.messages\?\.\[0\]\?\.id \|\| null/)
-  assert.match(plainSend, /const metaResult = await sendWorkspaceText/)
+  assert.match(plainSend, /metaResult = await sendWorkspaceText/)
   assert.match(plainSend, /meta_message_id: metaResult\?\.messages\?\.\[0\]\?\.id \|\| null/)
 })
