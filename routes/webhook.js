@@ -60,7 +60,7 @@ router.post('/', async (req, res) => {
       if (value.messages?.length) console.info(JSON.stringify({event:'whatsapp_inbound_path',source:'meta',field:'messages',connection_id:number.id,count:value.messages.length}))
       for (const incoming of value.messages || []) {
         const parsed = parseInboundMedia(incoming)
-        await processMessage({ customerId: number.customer_id, number, from: incoming.from, body: parsed.body, media: parsed.media, adReferral:normalizeAdReferral(incoming.referral),profileName:profileNameFor(value,incoming.from), metaId: incoming.id, replyContextMetaId: parseInboundReplyContext(incoming) })
+        await processMessage({ customerId: number.customer_id, number, from: incoming.from, body: parsed.body, media: parsed.media, unsupported: parsed.unsupported === true, adReferral:normalizeAdReferral(incoming.referral),profileName:profileNameFor(value,incoming.from), metaId: incoming.id, replyContextMetaId: parseInboundReplyContext(incoming) })
       }
     }
   } catch (error) {
@@ -204,6 +204,10 @@ async function processMessage(ctx) {
   const conversation = await persistInbound(ctx, contact, existing)
   ctx.contact = contact
   ctx.conversation = conversation
+
+  // Unknown WhatsApp payloads remain visible to staff, but must never
+  // initiate an AI conversation, welcome automation, or follow-up.
+  if (ctx.unsupported) return
 
   if (isMarketingOptOutCommand(ctx.body)) {
     const { data: updated, error } = await supabase.from('contacts')
