@@ -27,7 +27,10 @@ function fixture(extra=[]) {
    then(resolve,reject){
     if(race&&patch){const row=rows.find(r=>r.id===filters.find(f=>f[0]==='id')?.[2]);if(row)row.updated_at='2026-09-26T00:00:00.000Z';race=false;}
     let data=table==='conversations'?rows.filter(r=>filters.every(([k,op,v])=>k.startsWith('messages.') || (op==='eq'?r[k]===v:op==='neq'?r[k]!==v:op==='gt'?r[k]>v:v.includes(r[k])))):[];
-    if(log.or)data=data.filter(r=>r.assigned_user_id===null || r.assigned_user_id===person);
+    if(log.or?.startsWith('and(status.eq.needs_attention')) {
+      const cutoff=Date.parse(log.or.split('callback_due_at.lte.')[1]);
+      data=data.filter(row=>(row.status==='needs_attention' && row.control_mode==='needs_attention') || row.awaiting_reply || Date.parse(row.callback_due_at)<=cutoff);
+    } else if(log.or)data=data.filter(r=>r.assigned_user_id===null || r.assigned_user_id===person);
     const count=data.length;data=data.slice(start,Math.min(end+1,start+limit));
     if(patch)data.forEach(row=>Object.assign(row,patch));
     return Promise.resolve({data:head?null:single?structuredClone(data[0]||null):structuredClone(data),error:null,count}).then(resolve,reject);
@@ -115,4 +118,33 @@ test('keyword search finds old messages beyond the first page and keeps workspac
  assert.equal(second.body.conversations.length,15);assert.equal(second.body.next_offset,null);
  const unmatched=await f.call('GET','/',{query:{view:'unread',offset:'0',q:'tonneau'}});assert.equal(unmatched.body.conversations.length,0);
  const invalid=await f.call('GET','/',{query:{q:'x'}});assert.equal(invalid.status,400);
+});
+
+test('attention uses one workspace-scoped queue for handoffs, awaiting replies and due callbacks', async()=>{
+ const f=fixture([
+   {id:id(7),customer_id:'a',status:'open',control_mode:'human',awaiting_reply:true},
+   {id:id(8),customer_id:'a',status:'resolved',control_mode:'human',callback_due_at:'2025-01-01T10:00:00Z'},
+   {id:id(9),customer_id:'a',status:'open',control_mode:'human',callback_due_at:'2099-01-01T10:00:00Z'},
+   {id:id(10),customer_id:'b',status:'open',control_mode:'human',awaiting_reply:true}
+ ]);
+ const list=await f.call('GET','/',{query:{view:'needs_attention',offset:'0'}});
+ assert.deepEqual(list.body.conversations.map(row=>row.id),[1,4,7,8].map(id));
+ const counts=await f.call('GET','/counts');
+ assert.equal(counts.body.needs_attention,4);
+});
+
+test('workspace staff can record callbacks and outcomes without changing routing, with stale edits rejected', async()=>{
+ const f=fixture();
+ f.rows.forEach(row=>{row.callback_due_at=null;row.booked_at=null;row.paid_at=null});
+ const patch=(n,field,value,expected=null)=>f.call('PATCH','/:id/workflow',{role:'member',params:{id:id(n)},body:{field,value,expected}});
+ const due='2026-11-10T09:00:00.000Z';
+ assert.equal((await patch(1,'callback_due_at',due)).body.conversation.callback_due_at,due);
+ assert.equal((await patch(1,'callback_due_at',null)).status,409);
+ assert.equal((await patch(1,'booked_at',true)).body.conversation.control_mode,'needs_attention');
+ assert.ok((await patch(1,'paid_at',true)).body.conversation.paid_at);
+ assert.ok(f.rows[0].booked_at);
+ assert.equal((await patch(1,'callback_due_at',null,due)).body.conversation.callback_due_at,null);
+ assert.equal((await patch(1,'callback_due_at','tomorrow')).status,400);
+ assert.equal((await patch(1,'customer_id','b')).status,400);
+ assert.equal((await patch(6,'paid_at',true)).status,404);
 });

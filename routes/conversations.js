@@ -30,7 +30,7 @@ function parseConversationUpload(req, res, next) {
   })
 }
 
-const CONVERSATION_FIELDS = 'id, customer_id, whatsapp_number_id, contact_id, status, control_mode, assigned_user_id, handoff_reason, handoff_at, taken_over_at, resolved_at, resolved_by_user_id, last_message_at, last_inbound_at, last_outbound_at, unread_count, created_at, updated_at, contacts(id,name,phone_number,tag,marketing_opted_out)'
+const CONVERSATION_FIELDS = 'id, customer_id, whatsapp_number_id, contact_id, status, control_mode, assigned_user_id, handoff_reason, handoff_at, taken_over_at, resolved_at, resolved_by_user_id, last_message_at, last_inbound_at, last_outbound_at, callback_due_at, booked_at, paid_at, unread_count, created_at, updated_at, contacts(id,name,phone_number,tag,marketing_opted_out)'
 
 function isAdmin(role) {
   return ['owner', 'admin'].includes(role)
@@ -390,6 +390,41 @@ router.patch('/:id/assignment', requireAdmin, async (req, res) => {
     return res.json({ conversation: data })
   } catch (error) {
     return res.status(400).json({ error: error.message || 'Unable to update assignment' })
+  }
+})
+
+// Workspace staff can log a commercial outcome or callback independently of
+// who controls the WhatsApp conversation.
+router.patch('/:id/workflow', async (req, res) => {
+  const { field, value, expected } = req.body || {}
+  if (!['callback_due_at', 'booked_at', 'paid_at'].includes(field)) {
+    return res.status(400).json({ error: 'Choose a callback, booking or payment field' })
+  }
+  const isTimestamp = input => typeof input === 'string'
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(input)
+    && Number.isFinite(Date.parse(input))
+  if (expected !== null && !isTimestamp(expected)) {
+    return res.status(400).json({ error: 'Refresh the conversation before updating it' })
+  }
+  if (field === 'callback_due_at' ? value !== null && !isTimestamp(value) : typeof value !== 'boolean') {
+    return res.status(400).json({ error: 'Invalid callback time or outcome' })
+  }
+
+  try {
+    const now = new Date().toISOString()
+    const nextValue = field === 'callback_due_at' ? value : value ? expected || now : null
+    let update = supabase.from('conversations').update({ [field]: nextValue, updated_at: now })
+      .eq('customer_id', req.workspace.customerId).eq('id', req.params.id)
+    update = expected === null ? update.is(field, null) : update.eq(field, expected)
+    const { data, error } = await update.select(CONVERSATION_FIELDS).maybeSingle()
+    if (error) throw error
+    if (data) return res.json({ conversation: data })
+
+    const current = await getConversation(req.workspace.customerId, req.params.id)
+    if (!current) return res.status(404).json({ error: 'Conversation not found' })
+    return res.status(409).json({ error: 'A team member already changed this field. Review the latest value and try again.', conversation: current })
+  } catch {
+    return res.status(500).json({ error: 'Unable to save the callback or outcome' })
   }
 })
 
