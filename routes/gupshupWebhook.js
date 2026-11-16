@@ -35,9 +35,16 @@ function createGupshupWebhookRouter({ db, webhookSecret }) {
         }))
         return res.sendStatus(422)
       }
-      for (const entry of req.body.entry || []) for (const change of entry.changes || []) {
-        const statuses = (change.value?.statuses || []).filter(s=>s.type!=='set-callback');
-        await persistDeliveryStatuses(db,statuses,result.data,'gupshup');
+      // Persist receipts only for the verified WABA and phone. Do not bypass
+      // the identity checks performed by normalizeGupshupIncoming above.
+      for (const entry of req.body.entry || []) {
+        if (entry.id && entry.id !== result.data.whatsapp_business_account_id) continue
+        for (const change of entry.changes || []) {
+          if (change.field !== 'messages') continue
+          if (change.value?.metadata?.phone_number_id && change.value.metadata.phone_number_id !== result.data.phone_number_id) continue
+          const statuses = (change.value?.statuses || []).filter(s=>s.type!=='set-callback')
+          await persistDeliveryStatuses(db,statuses,result.data,'gupshup')
+        }
       }
       const activeEvents = result.data.status === 'disconnected' ? events.filter(event=>event.event_type==='status') : events
       await persistGupshupEvents(db, mapping, activeEvents)
