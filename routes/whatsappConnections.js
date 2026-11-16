@@ -162,7 +162,7 @@ router.post('/:id/disconnect', requireAdmin, async (req, res) => {
   try {
     const customerId = req.workspace.customerId
     const { data, error } = await supabase.from('whatsapp_numbers')
-      .update({ status:'disconnected', disconnected_at:new Date().toISOString() })
+      .update({ status:'disconnected', provisioning_state:null, provisioning_error:null, disconnected_at:new Date().toISOString() })
       .eq('id', req.params.id).eq('customer_id', customerId).eq('status', 'connected')
       .select('id').maybeSingle()
     if (error) throw error
