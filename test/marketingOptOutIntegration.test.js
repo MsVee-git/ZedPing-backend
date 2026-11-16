@@ -84,6 +84,7 @@ function loadRoute(file, db) {
     '../lib/conversationEvents': { async recordConversationEvent() {} },
     '../lib/automationExecution': { async recordAutomationEvent() {} },
     '../lib/chatbotExecution': { async continueFlow() { routed.push('flow'); return false } },
+    '../lib/chatbotWhatsAppTest': { async routeWhatsAppTest() { return false } },
     // These are evaluated only on the Zoe path, which this opt-out suite
     // deliberately instruments away below. Keep the route loader compatible
     // with its current established imports without exercising Zoe itself.

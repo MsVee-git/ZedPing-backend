@@ -20,6 +20,7 @@ const { recordAutomationEvent, claimWelcome, completeWelcome, releaseWelcome } =
 const { inboundEventPayload, isDuplicateInboundEventError } = require('../lib/inboundWebhookEvents')
 const { selectSoleActiveAgent } = require('../lib/aiAgentSelection')
 const { startFlow, continueFlow } = require('../lib/chatbotExecution')
+const { routeWhatsAppTest } = require('../lib/chatbotWhatsAppTest')
 const { normalizePhone } = require('../lib/contactImport')
 const { buildLiveSystem, configuredHandoff, handoffReply, handoffConfirmation, isCustomerSafeReply, hasNaturalTeamTransition, removeHandoffMarker, requestsModelHandoff } = require('../lib/zoeGrounding')
 const { commercialTurn, commercialMetadata } = require('../lib/zoeCommercial')
@@ -199,6 +200,7 @@ async function processMessage(ctx) {
   // Claim the Meta message identity before any contact, conversation, message,
   // or automation side effect. A retry therefore cannot trigger twice.
   if (!(await claimInboundEvent(ctx))) return
+  if (!isMarketingOptOutCommand(ctx.body) && await routeWhatsAppTest(supabase, ctx, sendWorkspaceText)) return
   const contact = await findOrCreateContact(ctx)
   const existing = await findConversation(ctx, contact)
   const conversation = await persistInbound(ctx, contact, existing)
@@ -222,6 +224,8 @@ async function processMessage(ctx) {
 }
 
 async function runInboundAutomation(ctx) {
+  if (ctx.inboundProvider === 'gupshup' && !isMarketingOptOutCommand(ctx.body) &&
+      await routeWhatsAppTest(supabase, ctx, sendWorkspaceText)) return
   const conversation = ctx.conversation
   const followupsCancelled = cancelFollowups(supabase, ctx.customerId, conversation.id)
     .catch(() => console.error('Lead follow-up cancellation failed'))

@@ -1,9 +1,11 @@
 const express = require('express')
+const { randomBytes, randomUUID } = require('node:crypto')
 const router = express.Router()
 const supabase = require('../lib/supabase')
 const { requireAdmin } = require('../middleware/auth')
 const { validateDefinition, simulateFlow } = require('../lib/chatbotRuntime')
 const { libraryTemplate } = require('../lib/chatbotFlowLibrary')
+const { normalizePhone } = require('../lib/contactImport')
 
 function cleanName(value) {
   const name = String(value || '').trim()
@@ -12,7 +14,7 @@ function cleanName(value) {
 }
 
 async function workspaceNumber(customerId, id) {
-  const { data, error } = await supabase.from('whatsapp_numbers').select('id,customer_id,status')
+  const { data, error } = await supabase.from('whatsapp_numbers').select('id,customer_id,status,phone_number')
     .eq('id', id).eq('customer_id', customerId).eq('status', 'connected').maybeSingle()
   if (error) throw error
   if (!data) throw new Error('Select a connected WhatsApp number from this workspace')
@@ -180,6 +182,34 @@ router.post('/:id/archive', requireAdmin, async (req, res) => {
     if (error) throw error
     res.json(data)
   } catch (error) { res.status(400).json({ error: error.message || 'Unable to archive chatbot flow' }) }
+})
+
+router.post('/:id/whatsapp-test', requireAdmin, async (req, res) => {
+  try {
+    const customerId = req.workspace.customerId
+    const flow = await flowForWorkspace(customerId, req.params.id)
+    if (flow.archived_at) throw new Error('Archived flows cannot be tested')
+    const number = await workspaceNumber(customerId, flow.whatsapp_number_id)
+    const sender = normalizePhone(req.body?.phone)
+    const businessPhone = number.phone_number
+    if (businessPhone && sender.replace(/^\+/, '') === String(businessPhone).replace(/\D/g, '')) {
+      throw new Error('Enter the phone that will send the test messages')
+    }
+    const contentItems = await contentForDefinition(customerId, flow.draft_definition)
+    const definition = validateDefinition(flow.draft_definition, { contentItems })
+    const startCode = randomBytes(4).toString('hex').toUpperCase()
+    const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString()
+    const { error } = await supabase.from('chatbot_whatsapp_tests').upsert({
+      id: randomUUID(), customer_id: customerId, whatsapp_number_id: number.id,
+      flow_id: flow.id, sender, start_code: startCode, definition,
+      content_items: Object.fromEntries(contentItems), inputs: null, expires_at: expiresAt
+    }, { onConflict: 'customer_id,whatsapp_number_id,sender' })
+    if (error) {
+      console.error('Unable to prepare WhatsApp chatbot test', error.code)
+      return res.status(500).json({ error: 'Unable to prepare the WhatsApp test' })
+    }
+    res.status(201).json({ command: 'ZEDPING TEST ' + startCode, expires_at: expiresAt, business_phone: businessPhone || null })
+  } catch (error) { res.status(400).json({ error: error.message || 'Unable to prepare the WhatsApp test' }) }
 })
 
 router.post('/:id/test', requireAdmin, async (req, res) => {
