@@ -52,6 +52,20 @@ test('sequence uses absolute 1/24/72/96-hour offsets and stable anchor',()=>{
  const jobs=plan();assert.deepEqual(jobs.map(job=>job.step),[1,24,72,96]);assert.equal(jobs[2].due_at,'2026-11-04T10:00:00.000Z');assert.equal(jobs[3].due_at,'2026-11-05T10:00:00.000Z')
  assert.equal(jobs[1].template_id,'t24');assert.equal(jobs[2].template_id,'t72')
 })
+test('preserves database timestamp precision when scheduling and detecting replies',()=>{
+ const preciseConversation={...conversation,last_inbound_at:'2026-11-01T12:00:00.123456+02:00'}
+ const jobs=plannedJobs({customerId:'c',agent,conversation:preciseConversation,session,config})
+ assert.deepEqual(jobs.map(job=>job.due_at),[
+   '2026-11-01T11:00:00.123456Z','2026-11-02T10:00:00.123456Z',
+   '2026-11-04T10:00:00.123456Z','2026-11-05T10:00:00.123456Z'
+ ])
+ const state={conversation:{...preciseConversation,last_inbound_at:'2026-11-01T10:00:00.123456Z'},contact,agent,version,session}
+ const now=Date.parse(jobs[0].due_at)
+ assert.equal(followupEligible(jobs[0],state,now),true)
+ state.conversation.last_inbound_at='2026-11-01T10:00:00.123457Z'
+ assert.equal(followupEligible(jobs[0],state,now),false)
+})
+
 test('live agents schedule automatically; test mode and declined conversations do not enroll',()=>{
  const jobs=plannedJobs({customerId:'c',agent,conversation,session});
  assert.deepEqual(jobs.map(job=>job.template_id),[null,'auto:24','auto:72',null])
