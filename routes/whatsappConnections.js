@@ -465,6 +465,36 @@ router.post('/embedded-signup/complete', requireAdmin, async (req, res) => {
 })
 
 const reconciliationInFlight=new Map()
+// Read-only provider diagnostics for connected numbers; no relinking, re-registration or sends.
+router.get('/:id/provider-health', requireAdmin, async (req,res) => {
+  res.set('Cache-Control','no-store')
+  if(!validId(req.params.id)) return res.status(400).json({error:'Invalid connection'})
+  try {
+    const connection=await loadConnection(req.params.id,req.workspace.customerId)
+    if(!connection) return res.status(404).json({error:'Connection not found'})
+    const mapping=await createGupshupConnectionStore(supabase).load({customerId:req.workspace.customerId,connectionId:connection.id})
+    if(!mapping?.app_id || mapping.link_state!=='linked') return res.json({provider:'gupshup',state:'not_linked'})
+    const config=gupshupConfigForCustomer(req.workspace.customerId)
+    if(!config) return res.status(503).json({provider:'gupshup',state:'not_configured'})
+    const partner=createGupshupPartnerClient(config)
+    const [identity,pipeline]=await Promise.allSettled([
+      partner.inspectConnectionIdentity(mapping.app_id,connection.phone_number),
+      partner.getAppStatus(mapping.app_id,{expectedPhone:connection.phone_number})
+    ])
+    const identityResult=identity.status==='fulfilled'?identity.value:{state:'unavailable'}
+    const pipelineResult=pipeline.status==='fulfilled'?pipeline.value:{state:'unavailable'}
+    const recordedWaba=String(connection.whatsapp_business_account_id||'')
+    const identityText=JSON.stringify(identityResult.identifiers||identityResult.waba_info?.identifiers||{})
+    const identityMatch=recordedWaba && identityText.includes(recordedWaba)
+    console.info(JSON.stringify({event:'gupshup_provider_health_check',connection_id:connection.id,identity_state:identityResult.state||'checked',waba_match:Boolean(identityMatch),pipeline_provisioned:pipelineResult.provisioned===true}))
+    return res.json({provider:'gupshup',state:'checked',connection_status:connection.status,
+      app_id:mapping.app_id,expected_waba_id:recordedWaba,
+      identity:identityResult,pipeline:pipelineResult})
+  } catch {
+    return res.status(503).json({provider:'gupshup',state:'unavailable',error:'Provider health check could not complete'})
+  }
+})
+
 router.post('/:id/provision/status', requireAdmin, async(req,res)=>{
   res.set('Cache-Control','no-store')
   if(!validId(req.params.id))return res.status(400).json({error:'Invalid connection'})
