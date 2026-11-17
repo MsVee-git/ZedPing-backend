@@ -602,7 +602,7 @@ async function runLiveAiTurn(ctx, session, agent, version) {
     }))
     const nextHistory = boundedHistory([...history, { role: 'assistant', content: reply }])
     await updateLiveSession(ctx, session, { messages:nextHistory })
-    await scheduleFollowups(supabase,{customerId:ctx.customerId,conversation:ctx.conversation,agent,session,config:live.configuration.followups,latestMessage:ctx.body}).catch(()=>console.error('Lead follow-up scheduling failed'))
+    await scheduleFollowups(supabase,{customerId:ctx.customerId,conversation:ctx.conversation,agent,session,config:live.configuration.followups,latestMessage:ctx.body}).catch(error=>console.error('Lead follow-up scheduling failed', JSON.stringify({code:error?.code || null,message:error?.message || String(error),details:error?.details || null,hint:error?.hint || null})))
     await recordAiExecutionEvent(supabase, {
       customerId: ctx.customerId, whatsappNumberId: ctx.number.id, agentId: agent.id, sessionId: session.id,
       agentVersion: session.agent_version, model: completion?.model || BETA_MODEL, outcome: 'replied', executionMode: 'live',
