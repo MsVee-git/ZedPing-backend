@@ -652,7 +652,8 @@ async function runLiveAiTurn(ctx, session, agent, version) {
       agentVersion: session.agent_version, model: BETA_MODEL, outcome: 'failed', executionMode: 'live',
       durationMs: Date.now() - started, errorCategory: 'provider_or_runtime_error'
     }).catch(() => {})
-    if (handoffStarted || ctx.voiceAiSendStarted) throw _
+    if (handoffStarted) throw _
+    if (ctx.voiceAiSendStarted) throw _
     return handoff('ai_execution_failed', null)
   }
 }
