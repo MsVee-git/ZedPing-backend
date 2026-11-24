@@ -270,6 +270,15 @@ router.get('/:id/messages/:messageId/media', async (req, res) => {
       .eq('conversation_id', conversation.id)
       .maybeSingle()
     if (error) throw error
+    if (message?.direction === 'inbound' && message.inbound_media?.type === 'audio') {
+      const { BUCKET, voicePath, audioFormat } = require('../lib/voiceNotes')
+      if (message.inbound_media.audio_status !== 'ready') return res.status(404).json({ error: 'Voice note is unavailable' })
+      const { mimeType } = audioFormat(message.inbound_media.mime_type)
+      const { data: blob, error: storageError } = await supabase.storage.from(BUCKET).download(voicePath(message))
+      if (storageError || !blob) return res.status(404).json({ error: 'Voice note is unavailable' })
+      res.set({ 'Content-Type': mimeType, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' })
+      return res.status(200).send(Buffer.from(await blob.arrayBuffer()))
+    }
     const attachment = message?.direction === 'inbound' ? storedInboundAttachment(message.inbound_media) : storedAttachment(message?.outbound_media)
     if (!attachment) return res.status(404).json({ error: 'Attachment is unavailable' })
     const { data: number, error: numberError } = await supabase.from('whatsapp_numbers')

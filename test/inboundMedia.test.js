@@ -23,3 +23,21 @@ test('conversation responses omit stored Meta media IDs while retaining render m
   assert.equal(JSON.stringify(publicInboundMedia(stored)).includes('1234567890'), false)
   assert.deepEqual(storedInboundImage(stored), { mediaId: '1234567890', mimeType: 'image/png' })
 })
+
+test('keeps Meta voice notes in the inbox and hides provider identifiers', () => {
+  const parsed = parseInboundMedia({ type: 'audio', audio: { id: '1234567890', mime_type: 'audio/ogg; codecs=opus', voice: true } })
+  assert.equal(parsed.unsupported, undefined)
+  assert.equal(parsed.media.type, 'audio')
+  assert.equal(parsed.media.media_id, '1234567890')
+  assert.equal(publicInboundMedia(parsed.media).media_id, undefined)
+})
+
+test('accepts only Gupshup HTTPS audio download hosts and paths', () => {
+  const options = { provider: 'gupshup' }
+  const url = 'https://filemanager.gupshup.io/wa/app/wa/media/file?download=false'
+  const parse = value => parseInboundMedia({ type: 'audio', audio: { url: value } }, options).media
+  assert.equal(parse(url).provider_url, url)
+  assert.equal(publicInboundMedia(parse(url)).provider_url, undefined)
+  assert.equal(parse('https://filemanager.gupshup.io.evil.example/wa/app/wa/media/file').provider_url, undefined)
+  assert.equal(parse('https://filemanager.gupshup.io:8443/wa/app/wa/media/file').provider_url, undefined)
+})

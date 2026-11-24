@@ -46,7 +46,26 @@ function validSignature(req) {
 
 router.post('/', async (req, res) => {
   if (!validSignature(req)) return res.sendStatus(401)
-  try { await persistMetaDeliveryPayload(supabase, req.body) } catch { return res.sendStatus(503) }
+  try {
+    await persistMetaDeliveryPayload(supabase, req.body)
+    for (const entry of req.body.entry || []) for (const change of entry.changes || []) {
+      if (!require('../lib/whatsappRoutingDiagnostics').metaMessageChange(change)) continue
+      const value = change.value || {}
+      const numberId = value.metadata?.phone_number_id
+      if (!numberId) continue
+      for (const incoming of value.messages || []) {
+        const { media } = parseInboundMedia(incoming)
+        if (media?.type !== 'audio' || !incoming.id || !/^[1-9][0-9]{6,14}$/.test(incoming.from || '')) continue
+        const { error } = await supabase.rpc('persist_meta_whatsapp_voice_note', {
+          phone_id: numberId, waba_id: entry.id || null, sender: incoming.from,
+          provider_message_id: incoming.id, audio_metadata: media,
+          sender_name: profileNameFor(value, incoming.from),
+          reply_id: parseInboundReplyContext(incoming), referral: normalizeAdReferral(incoming.referral)
+        })
+        if (error) throw error
+      }
+    }
+  } catch { return res.sendStatus(503) }
   res.sendStatus(200)
   try {
     for (const entry of req.body.entry || []) for (const change of entry.changes || []) {
@@ -61,6 +80,7 @@ router.post('/', async (req, res) => {
       if (value.messages?.length) console.info(JSON.stringify({event:'whatsapp_inbound_path',source:'meta',field:'messages',connection_id:number.id,count:value.messages.length}))
       for (const incoming of value.messages || []) {
         const parsed = parseInboundMedia(incoming)
+        if (parsed.media?.type === 'audio') continue
         await processMessage({ customerId: number.customer_id, number, from: incoming.from, body: parsed.body, media: parsed.media, unsupported: parsed.unsupported === true, adReferral:normalizeAdReferral(incoming.referral),profileName:profileNameFor(value,incoming.from), metaId: incoming.id, replyContextMetaId: parseInboundReplyContext(incoming) })
       }
     }
@@ -224,7 +244,7 @@ async function processMessage(ctx) {
 }
 
 async function runInboundAutomation(ctx) {
-  if (ctx.inboundProvider === 'gupshup' && !isMarketingOptOutCommand(ctx.body) &&
+  if (ctx.media?.type !== 'audio' && ctx.inboundProvider === 'gupshup' && !isMarketingOptOutCommand(ctx.body) &&
       await routeWhatsAppTest(supabase, ctx, sendWorkspaceText)) return
   const conversation = ctx.conversation
   const followupsCancelled = cancelFollowups(supabase, ctx.customerId, conversation.id)
@@ -245,7 +265,20 @@ async function runInboundAutomation(ctx) {
   await checkAutomations(ctx)
 }
 
+async function authorizeVoiceReply(ctx) {
+  if (ctx.media?.type === 'audio') {
+    const { data, error } = await supabase.from('conversations').select('control_mode,status')
+      .eq('id', ctx.conversation.id).eq('customer_id', ctx.customerId).single()
+    if (error || data.status === 'resolved' || shouldSuppressAutomation(data)) throw new Error('Voice reply cancelled')
+  }
+}
+
 async function outgoing(ctx, body) {
+  if (ctx.media?.type === 'audio') await authorizeVoiceReply(ctx)
+  if (ctx.voiceAiTurn) {
+    if (ctx.voiceAiSendStarted) throw new Error('Voice reply already attempted')
+    ctx.voiceAiSendStarted = true
+  }
   const result = await sendWorkspaceText({ number: ctx.number, customerId: ctx.customerId, to: ctx.from, body })
   const now = new Date().toISOString()
   const { data: message, error } = await supabase.from('messages').insert({
@@ -278,6 +311,7 @@ async function outgoingContentAttachment(ctx, attachment, source, caption = null
   if (claimError) throw claimError
   try {
     const prepared = await fileForAttachment(supabase, ctx.customerId, attachment)
+    if (ctx.media?.type === 'audio') await authorizeVoiceReply(ctx)
     const { mediaId, result } = await sendWorkspaceAttachment({
       number: ctx.number, customerId: ctx.customerId, to: ctx.from,
       attachment: { ...prepared.attachment, file: prepared.file, caption }
@@ -523,6 +557,7 @@ async function updateLiveSession(ctx, session, { messages, commercialContext }) 
 }
 
 async function runLiveAiTurn(ctx, session, agent, version) {
+  if (ctx.media?.type === 'audio') ctx.voiceAiTurn = true
   const quotedContext = aiReplyContext(ctx.replyToMessage)
   const adContext = adReferralContext(ctx.adReferral)
   const fromAd = ctx.adReferral?.source_type === 'ad' && Boolean(adContext)
@@ -557,7 +592,7 @@ async function runLiveAiTurn(ctx, session, agent, version) {
 
   const started = Date.now()
   try {
-    const file = live.attachmentDecision?.kind === 'selected' ? live.attachmentDecision.item : null
+    const file = ctx.media?.type !== 'audio' && live.attachmentDecision?.kind === 'selected' ? live.attachmentDecision.item : null
     let completion, reply
     let modelMs = 0
     if (file) {
@@ -617,7 +652,7 @@ async function runLiveAiTurn(ctx, session, agent, version) {
       agentVersion: session.agent_version, model: BETA_MODEL, outcome: 'failed', executionMode: 'live',
       durationMs: Date.now() - started, errorCategory: 'provider_or_runtime_error'
     }).catch(() => {})
-    if (handoffStarted) throw _
+    if (handoffStarted || ctx.voiceAiSendStarted) throw _
     return handoff('ai_execution_failed', null)
   }
 }

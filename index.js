@@ -127,3 +127,14 @@ const PORT = process.env.PORT || 3000
 app.listen(PORT, () => {
   console.log(`ZedPing backend running on port ${PORT}`)
 })
+const stopVoiceNotes = require('./lib/gupshupWorkerLoop').startGupshupWorkerLoop({
+  enabled: true,
+  run: () => require('./lib/voiceNotes').processVoiceNotes({
+    db: require('./lib/supabase'),
+    transcribe: require('./lib/openai').transcribeVoiceNote,
+    runAutomation: webhookRoutes.runInboundAutomation
+  }),
+  onError: () => console.error('WhatsApp voice note processing failed')
+})
+process.once('SIGTERM', stopVoiceNotes)
+process.once('SIGINT', stopVoiceNotes)

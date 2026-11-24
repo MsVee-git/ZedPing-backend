@@ -64,3 +64,14 @@ test('template quick-reply postbacks and interactive selections reach automation
  const wrong=callback();wrong.gs_app_id='another-app'
  assert.throws(()=>normalizeGupshupIncoming(wrong,mapping,number),/mapping mismatch/)
 })
+
+test('V3 voice notes retain the provider media ID and enter the durable inbox path', () => {
+ const payload = callback()
+ const message = payload.entry[0].changes[0].value.messages[0]
+ Object.assign(message, { type: 'audio', audio: { id: '1234567890', mime_type: 'audio/ogg', voice: true } })
+ const [event] = normalizeGupshupIncoming(payload, mapping, number)
+ assert.equal(event.event_key, 'message:msg1')
+ assert.equal(event.payload.media.provider, 'gupshup')
+ assert.equal(event.payload.media.media_id, '1234567890')
+ assert.equal(event.payload.media.audio_status, 'pending')
+})
