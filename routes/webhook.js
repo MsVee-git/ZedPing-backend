@@ -1,6 +1,6 @@
 const { scheduleFollowups, cancelFollowups } = require('../lib/leadFollowups')
 const {normalizeAdReferral,profileNameFor,adReferralContext}=require('../lib/whatsappAdReferral')
-const { sendWorkspaceText, sendWorkspaceInteractiveButtons, sendWorkspaceAttachment } = require('../lib/whatsappRuntime')
+const { sendWorkspaceText, sendWorkspaceInteractiveButtons, sendWorkspaceInteractiveList, sendWorkspaceAttachment } = require('../lib/whatsappRuntime')
 const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
 const { persistMetaDeliveryPayload } = require('../lib/deliveryReceipts')
 const express = require('express')
@@ -302,8 +302,10 @@ async function outgoing(ctx, body) {
 
 async function outgoingChoice(ctx, step) {
   if (ctx.media?.type === 'audio') await authorizeVoiceReply(ctx)
-  const buttons = (step.choices || []).map((choice) => ({ id: `flow:${step.id}:${choice.id}`, title: choice.label }))
-  const result = await sendWorkspaceInteractiveButtons({ number: ctx.number, customerId: ctx.customerId, to: ctx.from, body: step.text, buttons })
+  const choices = (step.choices || []).map((choice) => ({ id: `flow:${step.id}:${choice.id}`, title: choice.label }))
+  const result = choices.length <= 3
+    ? await sendWorkspaceInteractiveButtons({ number: ctx.number, customerId: ctx.customerId, to: ctx.from, body: step.text, buttons: choices })
+    : await sendWorkspaceInteractiveList({ number: ctx.number, customerId: ctx.customerId, to: ctx.from, body: step.text, rows: choices })
   const now = new Date().toISOString()
   const { data: message, error } = await supabase.from('messages').insert({
     customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, contact_id: ctx.contact?.id || null,
