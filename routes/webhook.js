@@ -1,6 +1,6 @@
 const { scheduleFollowups, cancelFollowups } = require('../lib/leadFollowups')
 const {normalizeAdReferral,profileNameFor,adReferralContext}=require('../lib/whatsappAdReferral')
-const { sendWorkspaceText, sendWorkspaceAttachment } = require('../lib/whatsappRuntime')
+const { sendWorkspaceText, sendWorkspaceInteractiveButtons, sendWorkspaceAttachment } = require('../lib/whatsappRuntime')
 const { resolveWhatsAppAccessToken } = require('../lib/whatsappCredentials')
 const { persistMetaDeliveryPayload } = require('../lib/deliveryReceipts')
 const express = require('express')
@@ -261,7 +261,7 @@ async function runInboundAutomation(ctx) {
 
   if (await checkAISession(ctx, followupsCancelled)) return
   if (await startLiveZoeSession(ctx)) return
-  if (await continueFlow(ctx, outgoing)) return
+  if (await continueFlow(ctx, outgoing, outgoingChoice)) return
   await checkAutomations(ctx)
 }
 
@@ -297,6 +297,22 @@ async function outgoing(ctx, body) {
     await supabase.from('conversations').update({ last_message_at: now, last_outbound_at: now, updated_at: now })
       .eq('id', ctx.conversation.id).eq('customer_id', ctx.customerId)
   }
+  return message
+}
+
+async function outgoingChoice(ctx, step) {
+  if (ctx.media?.type === 'audio') await authorizeVoiceReply(ctx)
+  const buttons = (step.choices || []).map((choice) => ({ id: `flow:${step.id}:${choice.id}`, title: choice.label }))
+  const result = await sendWorkspaceInteractiveButtons({ number: ctx.number, customerId: ctx.customerId, to: ctx.from, body: step.text, buttons })
+  const now = new Date().toISOString()
+  const { data: message, error } = await supabase.from('messages').insert({
+    customer_id: ctx.customerId, whatsapp_number_id: ctx.number.id, contact_id: ctx.contact?.id || null,
+    conversation_id: ctx.conversation?.id || null, direction: 'outbound', to_number: ctx.from,
+    message_body: step.text, status: result?.provider === 'gupshup' ? 'accepted' : 'sent', meta_message_id: result?.messages?.[0]?.id || null
+  }).select().single()
+  if (error) throw error
+  if (ctx.conversation?.id) await supabase.from('conversations').update({ last_message_at: now, last_outbound_at: now, updated_at: now })
+    .eq('id', ctx.conversation.id).eq('customer_id', ctx.customerId)
   return message
 }
 
@@ -388,7 +404,7 @@ async function executeAutomation(ctx, automation) {
     return
   }
   if (kind === 'start_chatbot_flow' || automation.chatbot_flow_id) {
-    await startFlow(ctx, automation.chatbot_flow_id, outgoing)
+    await startFlow(ctx, automation.chatbot_flow_id, outgoing, outgoingChoice)
     await recordAutomationEvent(ctx, 'response_sent', 'success', { action_kind: 'start_chatbot_flow' }, automation.id)
     return
   }
